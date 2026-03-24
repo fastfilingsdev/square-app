@@ -1909,6 +1909,20 @@ app.get('/push-to-sheets', async (req, res) => {
       }
     }
 
+    // === LOCK CHECK ===
+    if (filingsRowNumber) {
+      const lockedValue = existingFilingsRows[filingsRowNumber - 1][16]; // column Q = Locked
+
+      if (String(lockedValue).toLowerCase() === 'true') {
+        return res.status(400).json({
+          success: false,
+          error: 'This filing is LOCKED and cannot be overwritten.',
+          period: periodValue,
+          customer_id: customerId
+        });
+      }
+    }
+
     let filingsAction = 'appended';
 
     if (filingsRowNumber) {
