@@ -125,6 +125,48 @@ function buildPeriodLabel(start, end, period) {
   return start || end || new Date().toISOString().slice(0, 7);
 }
 
+// Helper to fetch all Square payments with date range and pagination
+async function listSquarePayments(customerId, { start, end, locationId } = {}) {
+  const headers = await getSquareHeaders(customerId);
+  const payments = [];
+  let cursor;
+
+  do {
+    const params = {
+      sort_order: 'ASC'
+    };
+
+    if (start) {
+      params.begin_time = `${start}T00:00:00Z`;
+    }
+
+    if (end) {
+      params.end_time = `${end}T23:59:59Z`;
+    }
+
+    if (locationId) {
+      params.location_id = locationId;
+    }
+
+    if (cursor) {
+      params.cursor = cursor;
+    }
+
+    const response = await axios.get(
+      `${SQUARE_BASE_URL}/v2/payments`,
+      {
+        headers,
+        params
+      }
+    );
+
+    payments.push(...(response.data.payments || []));
+    cursor = response.data.cursor;
+  } while (cursor);
+
+  return payments;
+}
+
 async function exchangeSquareAuthorizationCode(code) {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     throw new Error('Missing SQUARE_CLIENT_ID or SQUARE_CLIENT_SECRET in .env');
@@ -496,14 +538,13 @@ app.get('/', (req, res) => {
 app.get('/pull-sales', async (req, res) => {
   try {
     const { customer_id } = req.query;
-    const response = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
+    const payments = await listSquarePayments(customer_id, {
+      start: req.query.start || null,
+      end: req.query.end || null,
+      locationId: req.query.location_id || null
+    });
 
-    res.json(response.data);
+    res.json({ payments });
   } catch (err) {
     console.error('SQUARE ERROR:', err.response?.data || err.message);
     res.status(500).json(err.response?.data || { error: err.message });
@@ -529,14 +570,11 @@ app.get('/locations', async (req, res) => {
 app.get('/sales-summary', async (req, res) => {
   try {
     const { customer_id } = req.query;
-    const response = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
-
-    const payments = response.data.payments || [];
+    const payments = await listSquarePayments(customer_id, {
+      start: req.query.start || null,
+      end: req.query.end || null,
+      locationId: req.query.location_id || null
+    });
 
     let grossSales = 0;
     let processingFees = 0;
@@ -575,39 +613,21 @@ app.get('/sales-summary', async (req, res) => {
 });
 
 app.get('/sales-tax-ready', async (req, res) => {
-    try {
+  try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
     const { start, end, period } = resolveDateRange(req.query);
 
-    const response = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
-
-    const payments = response.data.payments || [];
+    const payments = await listSquarePayments(customer_id, {
+      start,
+      end,
+      locationId: location_id || null
+    });
 
     const filteredPayments = payments.filter(payment => {
       if (payment.status !== 'COMPLETED') return false;
-
-      const createdAt = new Date(payment.created_at);
-      if (Number.isNaN(createdAt.getTime())) return false;
-
       if (location_id && payment.location_id !== location_id) return false;
-
-      if (start) {
-        const startDate = new Date(`${start}T00:00:00Z`);
-        if (createdAt < startDate) return false;
-      }
-
-      if (end) {
-        const endDate = new Date(`${end}T23:59:59Z`);
-        if (createdAt > endDate) return false;
-      }
-
       return true;
     });
 
@@ -650,7 +670,7 @@ app.get('/sales-tax-ready', async (req, res) => {
         period: period || null,
         location_id: location_id || null,
         customer_id: customer_id || null
-    },
+      },
       source: 'payments-api-v1',
       assumptions: [
         'taxable_sales currently assumes all completed sales are taxable',
@@ -690,34 +710,16 @@ app.get('/orders-tax-engine', async (req, res) => {
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
     const { start, end, period } = resolveDateRange(req.query);
 
-    const paymentsResponse = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
-
-    const payments = paymentsResponse.data.payments || [];
+    const payments = await listSquarePayments(customer_id, {
+      start,
+      end,
+      locationId: location_id || null
+    });
 
     const filteredPayments = payments.filter(payment => {
       if (payment.status !== 'COMPLETED') return false;
       if (!payment.order_id) return false;
-
-      const createdAt = new Date(payment.created_at);
-      if (Number.isNaN(createdAt.getTime())) return false;
-
       if (location_id && payment.location_id !== location_id) return false;
-
-      if (start) {
-        const startDate = new Date(`${start}T00:00:00Z`);
-        if (createdAt < startDate) return false;
-      }
-
-      if (end) {
-        const endDate = new Date(`${end}T23:59:59Z`);
-        if (createdAt > endDate) return false;
-      }
-
       return true;
     });
 
@@ -1008,34 +1010,16 @@ app.get('/catalog-enriched-orders', async (req, res) => {
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
     const { start, end, period } = resolveDateRange(req.query);
 
-    const paymentsResponse = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
-
-    const payments = paymentsResponse.data.payments || [];
+    const payments = await listSquarePayments(customer_id, {
+      start,
+      end,
+      locationId: location_id || null
+    });
 
     const filteredPayments = payments.filter(payment => {
       if (payment.status !== 'COMPLETED') return false;
       if (!payment.order_id) return false;
-
-      const createdAt = new Date(payment.created_at);
-      if (Number.isNaN(createdAt.getTime())) return false;
-
       if (location_id && payment.location_id !== location_id) return false;
-
-      if (start) {
-        const startDate = new Date(`${start}T00:00:00Z`);
-        if (createdAt < startDate) return false;
-      }
-
-      if (end) {
-        const endDate = new Date(`${end}T23:59:59Z`);
-        if (createdAt > endDate) return false;
-      }
-
       return true;
     });
 
@@ -1238,40 +1222,22 @@ app.get('/catalog-enriched-orders', async (req, res) => {
 });
 
 app.get('/classification-layer', async (req, res) => {
-   try {
+  try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
     const { start, end, period } = resolveDateRange(req.query);
 
-    const paymentsResponse = await axios.get(
-      `${SQUARE_BASE_URL}/v2/payments`,
-      {
-        headers: await getSquareHeaders(customer_id)
-      }
-    );
-
-    const payments = paymentsResponse.data.payments || [];
+    const payments = await listSquarePayments(customer_id, {
+      start,
+      end,
+      locationId: location_id || null
+    });
 
     const filteredPayments = payments.filter(payment => {
       if (payment.status !== 'COMPLETED') return false;
       if (!payment.order_id) return false;
-
-      const createdAt = new Date(payment.created_at);
-      if (Number.isNaN(createdAt.getTime())) return false;
-
       if (location_id && payment.location_id !== location_id) return false;
-
-      if (start) {
-        const startDate = new Date(`${start}T00:00:00Z`);
-        if (createdAt < startDate) return false;
-      }
-
-      if (end) {
-        const endDate = new Date(`${end}T23:59:59Z`);
-        if (createdAt > endDate) return false;
-      }
-
       return true;
     });
 
