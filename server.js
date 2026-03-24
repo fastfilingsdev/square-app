@@ -1383,6 +1383,10 @@ app.get('/classification-layer', async (req, res) => {
         }
 
         const observedTax = (item.total_tax_money?.amount || 0) / 100;
+        const normalizedItemName = itemName.toLowerCase();
+        const hasCatalogMatch = !!catalogItem;
+        const isUnnamedItem = normalizedItemName === 'unnamed item';
+        const isServiceChargeLike = normalizedItemName.includes('service charge') || normalizedItemName.includes('fee');
         const observedTaxable = observedTax > 0;
         const configuredTaxable = !!(catalogItem && Array.isArray(catalogItem.tax_ids) && catalogItem.tax_ids.length > 0);
 
@@ -1393,9 +1397,33 @@ app.get('/classification-layer', async (req, res) => {
           classificationStatus = 'taxable';
           reason = 'Tax was charged on the order and the catalog item has tax configured in Square.';
           taxableCount += 1;
-        } else if (!observedTaxable && !configuredTaxable) {
+        } else if (observedTaxable && !hasCatalogMatch && isUnnamedItem) {
+          classificationStatus = 'taxable';
+          reason = 'Tax was charged on an unnamed/custom Square line item, so it is treated as taxable.';
+          taxableCount += 1;
+        } else if (observedTaxable && !hasCatalogMatch && isServiceChargeLike) {
+          classificationStatus = 'taxable';
+          reason = 'Tax was charged on a service-charge/fee line item without a catalog match, so it is treated as taxable.';
+          taxableCount += 1;
+        } else if (observedTaxable && !hasCatalogMatch) {
+          classificationStatus = 'taxable';
+          reason = 'Tax was charged on a line item with no catalog match, so it is treated as taxable.';
+          taxableCount += 1;
+        } else if (!observedTaxable && hasCatalogMatch && !configuredTaxable) {
           classificationStatus = 'non_taxable';
           reason = 'No tax was charged on the order and the catalog item has no tax configured in Square.';
+          nonTaxableCount += 1;
+        } else if (!observedTaxable && !hasCatalogMatch && isUnnamedItem) {
+          classificationStatus = 'non_taxable';
+          reason = 'No tax was charged on an unnamed/custom Square line item, so it is treated as non-taxable.';
+          nonTaxableCount += 1;
+        } else if (!observedTaxable && !hasCatalogMatch && isServiceChargeLike) {
+          classificationStatus = 'non_taxable';
+          reason = 'No tax was charged on a service-charge/fee line item without a catalog match, so it is treated as non-taxable.';
+          nonTaxableCount += 1;
+        } else if (!observedTaxable && !hasCatalogMatch) {
+          classificationStatus = 'non_taxable';
+          reason = 'No tax was charged on a line item with no catalog match, so it is treated as non-taxable.';
           nonTaxableCount += 1;
         } else if (!observedTaxable && configuredTaxable) {
           classificationStatus = 'needs_review';
@@ -1420,7 +1448,7 @@ app.get('/classification-layer', async (req, res) => {
           observed_taxable_in_order: observedTaxable,
           classification_status: classificationStatus,
           reason,
-          catalog_match_found: !!catalogItem,
+          catalog_match_found: hasCatalogMatch,
           catalog: catalogItem ? {
             id: catalogItem.id,
             name: catalogItem.name,
