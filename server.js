@@ -10,9 +10,10 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const CLIENT_ID = process.env.SQUARE_CLIENT_ID;
 const CLIENT_SECRET = process.env.SQUARE_CLIENT_SECRET;
-const ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN;
+const ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || '';
 const REDIRECT_URI = process.env.SQUARE_REDIRECT_URI || 'http://localhost:3000/callback';
 const SQUARE_VERSION = process.env.SQUARE_VERSION || '2025-02-20';
+const SQUARE_BASE_URL = process.env.SQUARE_BASE_URL || 'https://connect.squareup.com';
 const GOOGLE_SHEETS_SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY;
@@ -130,7 +131,7 @@ async function exchangeSquareAuthorizationCode(code) {
   }
 
   const response = await axios.post(
-    'https://connect.squareupsandbox.com/oauth2/token',
+    `${SQUARE_BASE_URL}/oauth2/token`,
     {
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
@@ -158,7 +159,7 @@ async function refreshSquareAccessToken(refreshToken) {
   }
 
   const response = await axios.post(
-    'https://connect.squareupsandbox.com/oauth2/token',
+    `${SQUARE_BASE_URL}/oauth2/token`,
     {
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
@@ -340,7 +341,7 @@ app.get('/connect', (req, res) => {
     redirect_uri: REDIRECT_URI,
   });
 
-  const url = `https://connect.squareupsandbox.com/oauth2/authorize?${params.toString()}`;
+  const url = `${SQUARE_BASE_URL}/oauth2/authorize?${params.toString()}`;
   console.log('AUTH URL GENERATED FOR CUSTOMER:', customer_id);
   res.redirect(url);
 });
@@ -375,7 +376,7 @@ app.get('/callback', async (req, res) => {
       expiresAt: tokenData.expires_at || '',
       connected: true,
       connectedOn: new Date().toISOString(),
-      environment: 'Sandbox'
+      environment: SQUARE_BASE_URL.includes('squareupsandbox.com') ? 'Sandbox' : 'Production'
     });
 
     console.log('SQUARE TOKEN EXCHANGE SUCCESS:', {
@@ -411,7 +412,7 @@ app.get('/pull-sales', async (req, res) => {
   try {
     const { customer_id } = req.query;
     const response = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -427,7 +428,7 @@ app.get('/pull-sales', async (req, res) => {
 app.get('/locations', async (req, res) => {
   try {
     const response = await axios.get(
-      'https://connect.squareupsandbox.com/v2/locations',
+      `${SQUARE_BASE_URL}/v2/locations`,
       {
         headers: await getSquareHeaders(req.query.customer_id)
       }
@@ -444,7 +445,7 @@ app.get('/sales-summary', async (req, res) => {
   try {
     const { customer_id } = req.query;
     const response = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -497,7 +498,7 @@ app.get('/sales-tax-ready', async (req, res) => {
     const { start, end, period } = resolveDateRange(req.query);
 
     const response = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -608,7 +609,7 @@ app.get('/orders-tax-engine', async (req, res) => {
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -681,7 +682,7 @@ app.get('/orders-tax-engine', async (req, res) => {
     }
 
     const ordersResponse = await axios.post(
-      'https://connect.squareupsandbox.com/v2/orders/batch-retrieve',
+      `${SQUARE_BASE_URL}/v2/orders/batch-retrieve`,
       batchBody,
       {
         headers: {
@@ -829,7 +830,7 @@ app.get('/catalog-sync', async (req, res) => {
   try {
     const { customer_id } = req.query;
     const response = await axios.post(
-      'https://connect.squareupsandbox.com/v2/catalog/search',
+      `${SQUARE_BASE_URL}/v2/catalog/search`,
       {
         object_types: ['ITEM', 'CATEGORY', 'TAX']
       },
@@ -928,7 +929,7 @@ app.get('/catalog-enriched-orders', async (req, res) => {
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -962,7 +963,7 @@ app.get('/catalog-enriched-orders', async (req, res) => {
     const orderIds = [...new Set(filteredPayments.map(payment => payment.order_id).filter(Boolean))];
 
     const catalogResponse = await axios.post(
-      'https://connect.squareupsandbox.com/v2/catalog/search',
+      `${SQUARE_BASE_URL}/v2/catalog/search`,
       {
         object_types: ['ITEM', 'CATEGORY', 'TAX']
       },
@@ -1060,7 +1061,7 @@ app.get('/catalog-enriched-orders', async (req, res) => {
     if (location_id) batchBody.location_id = location_id;
 
     const ordersResponse = await axios.post(
-      'https://connect.squareupsandbox.com/v2/orders/batch-retrieve',
+      `${SQUARE_BASE_URL}/v2/orders/batch-retrieve`,
       batchBody,
       {
         headers: {
@@ -1166,7 +1167,7 @@ app.get('/classification-layer', async (req, res) => {
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
-      'https://connect.squareupsandbox.com/v2/payments',
+      `${SQUARE_BASE_URL}/v2/payments`,
       {
         headers: await getSquareHeaders(customer_id)
       }
@@ -1200,7 +1201,7 @@ app.get('/classification-layer', async (req, res) => {
     const orderIds = [...new Set(filteredPayments.map(payment => payment.order_id).filter(Boolean))];
 
     const catalogResponse = await axios.post(
-      'https://connect.squareupsandbox.com/v2/catalog/search',
+      `${SQUARE_BASE_URL}/v2/catalog/search`,
       {
         object_types: ['ITEM', 'CATEGORY', 'TAX']
       },
@@ -1304,7 +1305,7 @@ app.get('/classification-layer', async (req, res) => {
     if (location_id) batchBody.location_id = location_id;
 
     const ordersResponse = await axios.post(
-      'https://connect.squareupsandbox.com/v2/orders/batch-retrieve',
+      `${SQUARE_BASE_URL}/v2/orders/batch-retrieve`,
       batchBody,
       {
         headers: {
@@ -1846,12 +1847,13 @@ app.get('/debug-env', (req, res) => {
     hasAccessToken: !!process.env.SQUARE_ACCESS_TOKEN,
     clientIdPrefix: process.env.SQUARE_CLIENT_ID?.slice(0, 18) || null,
     accessTokenPrefix: process.env.SQUARE_ACCESS_TOKEN?.slice(0, 8) || null,
+    squareBaseUrl: SQUARE_BASE_URL,
     hasGoogleSpreadsheetId: !!process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
     hasGoogleServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     hasGooglePrivateKey: !!process.env.GOOGLE_PRIVATE_KEY,
     googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || null,
     googlePrivateKeyPrefix: process.env.GOOGLE_PRIVATE_KEY ? process.env.GOOGLE_PRIVATE_KEY.slice(0, 30) : null,
-    sampleManualPullExample: '/push-to-sheets?customer_id=DSTXB30XSBF96HKF4VB15X3VA0&period=02.26'
+    sampleManualPullExample: '/push-to-sheets?customer_id=CUS-0001&period=03.26'
   });
 });
 
