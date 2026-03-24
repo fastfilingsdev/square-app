@@ -296,7 +296,7 @@ async function syncCustomerSquareMerchantId(sheets, customerId, squareMerchantId
   };
 
   const customerIdIndex = getIndex('customer id', 'internal customer id', 'id');
-  const squareCustomerIdIndex = getIndex('square customer id', 'square id', 'square_customer_id');
+  const squareCustomerIdIndex = getIndex('square merchant id', 'square customer id', 'square id', 'square_customer_id');
   const squareConnectedIndex = getIndex('square connected', 'squareconnected');
   const lastSyncIndex = getIndex('last sync', 'lastsync');
 
@@ -1393,33 +1393,33 @@ app.get('/classification-layer', async (req, res) => {
         let classificationStatus = 'needs_review';
         let reason = 'No rule matched.';
 
-        if (observedTaxable && configuredTaxable) {
-          classificationStatus = 'taxable';
-          reason = 'Tax was charged on the order and the catalog item has tax configured in Square.';
-          taxableCount += 1;
-        } else if (observedTaxable && !hasCatalogMatch && isUnnamedItem) {
+        if (observedTaxable && isUnnamedItem) {
           classificationStatus = 'taxable';
           reason = 'Tax was charged on an unnamed/custom Square line item, so it is treated as taxable.';
           taxableCount += 1;
-        } else if (observedTaxable && !hasCatalogMatch && isServiceChargeLike) {
+        } else if (observedTaxable && isServiceChargeLike) {
           classificationStatus = 'taxable';
-          reason = 'Tax was charged on a service-charge/fee line item without a catalog match, so it is treated as taxable.';
+          reason = 'Tax was charged on a service-charge/fee line item, so it is treated as taxable.';
+          taxableCount += 1;
+        } else if (observedTaxable && configuredTaxable) {
+          classificationStatus = 'taxable';
+          reason = 'Tax was charged on the order and the catalog item has tax configured in Square.';
           taxableCount += 1;
         } else if (observedTaxable && !hasCatalogMatch) {
           classificationStatus = 'taxable';
           reason = 'Tax was charged on a line item with no catalog match, so it is treated as taxable.';
           taxableCount += 1;
-        } else if (!observedTaxable && hasCatalogMatch && !configuredTaxable) {
-          classificationStatus = 'non_taxable';
-          reason = 'No tax was charged on the order and the catalog item has no tax configured in Square.';
-          nonTaxableCount += 1;
-        } else if (!observedTaxable && !hasCatalogMatch && isUnnamedItem) {
+        } else if (!observedTaxable && isUnnamedItem) {
           classificationStatus = 'non_taxable';
           reason = 'No tax was charged on an unnamed/custom Square line item, so it is treated as non-taxable.';
           nonTaxableCount += 1;
-        } else if (!observedTaxable && !hasCatalogMatch && isServiceChargeLike) {
+        } else if (!observedTaxable && isServiceChargeLike) {
           classificationStatus = 'non_taxable';
-          reason = 'No tax was charged on a service-charge/fee line item without a catalog match, so it is treated as non-taxable.';
+          reason = 'No tax was charged on a service-charge/fee line item, so it is treated as non-taxable.';
+          nonTaxableCount += 1;
+        } else if (!observedTaxable && hasCatalogMatch && !configuredTaxable) {
+          classificationStatus = 'non_taxable';
+          reason = 'No tax was charged on the order and the catalog item has no tax configured in Square.';
           nonTaxableCount += 1;
         } else if (!observedTaxable && !hasCatalogMatch) {
           classificationStatus = 'non_taxable';
@@ -1617,7 +1617,7 @@ async function getCustomerMapping(sheets, squareCustomerId) {
 
     const stateIndex = getIndex('state');
     const internalCustomerIdIndex = getIndex('customer id', 'internal customer id', 'id');
-    const squareCustomerIdIndex = getIndex('square customer id', 'square id', 'square_customer_id');
+    const squareCustomerIdIndex = getIndex('square merchant id', 'square customer id', 'square id', 'square_customer_id');
     const nameIndex = getIndex('name', 'customer name');
     const businessNameIndex = getIndex('business name', 'business', 'business nm.', 'business nm');
     const filingFrequencyIndex = getIndex('filing frequency', 'frequency', 'period type');
@@ -1683,7 +1683,7 @@ async function getCustomerRecordByInternalId(sheets, internalCustomerId) {
 
     const stateIndex = getIndex('state');
     const internalCustomerIdIndex = getIndex('customer id', 'internal customer id', 'id');
-    const squareCustomerIdIndex = getIndex('square customer id', 'square id', 'square_customer_id');
+    const squareCustomerIdIndex = getIndex('square merchant id', 'square customer id', 'square id', 'square_customer_id');
     const nameIndex = getIndex('name', 'customer name');
     const businessNameIndex = getIndex('business name', 'business', 'business nm.', 'business nm');
     const filingFrequencyIndex = getIndex('filing frequency', 'frequency', 'period type');
