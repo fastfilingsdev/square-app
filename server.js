@@ -230,6 +230,84 @@ async function saveSquareConnection(sheets, connectionData) {
   return 'appended';
 }
 
+// Helper to sync the Square merchant ID into the Customers sheet
+async function syncCustomerSquareMerchantId(sheets, customerId, squareMerchantId) {
+  if (!customerId || !squareMerchantId) {
+    return 'skipped';
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+    range: 'Customers!A:Z'
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length < 4) {
+    return 'skipped';
+  }
+
+  const headerRowIndex = 2;
+  const headers = (rows[headerRowIndex] || []).map(header => String(header || '').trim().toLowerCase());
+  const getIndex = (...names) => {
+    const match = names.find(name => headers.includes(name));
+    return match ? headers.indexOf(match) : -1;
+  };
+
+  const customerIdIndex = getIndex('customer id', 'internal customer id', 'id');
+  const squareCustomerIdIndex = getIndex('square customer id', 'square id', 'square_customer_id');
+  const squareConnectedIndex = getIndex('square connected', 'squareconnected');
+  const lastSyncIndex = getIndex('last sync', 'lastsync');
+
+  if (customerIdIndex === -1 || squareCustomerIdIndex === -1) {
+    return 'skipped';
+  }
+
+  for (let i = headerRowIndex + 1; i < rows.length; i += 1) {
+    const row = rows[i] || [];
+    const existingCustomerId = String(row[customerIdIndex] || '').trim();
+
+    if (existingCustomerId !== String(customerId).trim()) {
+      continue;
+    }
+
+    const rowNumber = i + 1;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      range: `Customers!${String.fromCharCode(65 + squareCustomerIdIndex)}${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[squareMerchantId]]
+      }
+    });
+
+    if (squareConnectedIndex > -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        range: `Customers!${String.fromCharCode(65 + squareConnectedIndex)}${rowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [['Yes']]
+        }
+      });
+    }
+
+    if (lastSyncIndex > -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        range: `Customers!${String.fromCharCode(65 + lastSyncIndex)}${rowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [[new Date().toISOString().slice(0, 10)]]
+        }
+      });
+    }
+
+    return 'updated';
+  }
+
+  return 'not_found';
+}
+
 function isTokenExpiringSoon(expiresAt) {
   if (!expiresAt) return false;
 
@@ -378,6 +456,11 @@ app.get('/callback', async (req, res) => {
       connectedOn: new Date().toISOString(),
       environment: SQUARE_BASE_URL.includes('squareupsandbox.com') ? 'Sandbox' : 'Production'
     });
+    const customerSheetAction = await syncCustomerSquareMerchantId(
+      sheets,
+      stateData?.customerId || '',
+      tokenData.merchant_id || ''
+    );
 
     console.log('SQUARE TOKEN EXCHANGE SUCCESS:', {
       customer_id: stateData?.customerId || null,
@@ -385,7 +468,8 @@ app.get('/callback', async (req, res) => {
       access_token_prefix: tokenData.access_token ? tokenData.access_token.slice(0, 12) : null,
       refresh_token_present: !!tokenData.refresh_token,
       expires_at: tokenData.expires_at || null,
-      connections_sheet_action: connectionAction
+      connections_sheet_action: connectionAction,
+      customers_sheet_action: customerSheetAction
     });
 
     res.json({
@@ -396,7 +480,8 @@ app.get('/callback', async (req, res) => {
       expires_at: tokenData.expires_at || null,
       token_type: tokenData.token_type || null,
       short_lived: tokenData.short_lived || null,
-      connections_sheet_action: connectionAction
+      connections_sheet_action: connectionAction,
+      customers_sheet_action: customerSheetAction
     });
   } catch (err) {
     console.error('SQUARE TOKEN EXCHANGE ERROR:', err.response?.data || err.message);
