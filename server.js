@@ -1826,9 +1826,13 @@ app.get('/push-to-sheets', async (req, res) => {
 
     const reviewRows = [];
     orders.forEach(order => {
+      // Only include orders for this customer (prevents UNKNOWN duplicates)
+      if (order.square_customer_id && order.square_customer_id !== squareCustomerId) {
+        return;
+      }
       (order.line_items || []).forEach(item => {
         if (item.classification_status === 'needs_review') {
-                    reviewRows.push([
+          reviewRows.push([
             state,
             periodValue,
             periodStart,
