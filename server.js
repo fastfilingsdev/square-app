@@ -579,7 +579,6 @@ app.get('/sales-tax-ready', async (req, res) => {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
-    const squareCustomerId = customerRecord.squareCustomerId || '';
     const { start, end, period } = resolveDateRange(req.query);
 
     const response = await axios.get(
@@ -598,7 +597,6 @@ app.get('/sales-tax-ready', async (req, res) => {
       if (Number.isNaN(createdAt.getTime())) return false;
 
       if (location_id && payment.location_id !== location_id) return false;
-      if (squareCustomerId && payment.customer_id !== squareCustomerId) return false;
 
       if (start) {
         const startDate = new Date(`${start}T00:00:00Z`);
@@ -690,7 +688,6 @@ app.get('/orders-tax-engine', async (req, res) => {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
-    const squareCustomerId = customerRecord.squareCustomerId || '';
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
@@ -710,7 +707,6 @@ app.get('/orders-tax-engine', async (req, res) => {
       if (Number.isNaN(createdAt.getTime())) return false;
 
       if (location_id && payment.location_id !== location_id) return false;
-      if (squareCustomerId && payment.customer_id !== squareCustomerId) return false;
 
       if (start) {
         const startDate = new Date(`${start}T00:00:00Z`);
@@ -1010,7 +1006,6 @@ app.get('/catalog-enriched-orders', async (req, res) => {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
-    const squareCustomerId = customerRecord.squareCustomerId || '';
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
@@ -1030,7 +1025,6 @@ app.get('/catalog-enriched-orders', async (req, res) => {
       if (Number.isNaN(createdAt.getTime())) return false;
 
       if (location_id && payment.location_id !== location_id) return false;
-      if (squareCustomerId && payment.customer_id !== squareCustomerId) return false;
 
       if (start) {
         const startDate = new Date(`${start}T00:00:00Z`);
@@ -1248,7 +1242,6 @@ app.get('/classification-layer', async (req, res) => {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
     const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
-    const squareCustomerId = customerRecord.squareCustomerId || '';
     const { start, end, period } = resolveDateRange(req.query);
 
     const paymentsResponse = await axios.get(
@@ -1268,7 +1261,6 @@ app.get('/classification-layer', async (req, res) => {
       if (Number.isNaN(createdAt.getTime())) return false;
 
       if (location_id && payment.location_id !== location_id) return false;
-      if (squareCustomerId && payment.customer_id !== squareCustomerId) return false;
 
       if (start) {
         const startDate = new Date(`${start}T00:00:00Z`);
