@@ -272,6 +272,7 @@ async function saveSquareConnection(sheets, connectionData) {
   return 'appended';
 }
 
+
 // Helper to sync the Square merchant ID into the Customers sheet
 async function syncCustomerSquareMerchantId(sheets, customerId, squareMerchantId) {
   if (!customerId || !squareMerchantId) {
@@ -348,6 +349,112 @@ async function syncCustomerSquareMerchantId(sheets, customerId, squareMerchantId
   }
 
   return 'not_found';
+}
+
+// === Inserted helper functions ===
+async function syncCustomerLastSyncDate(sheets, customerId, syncDate = new Date()) {
+  if (!customerId) {
+    return 'skipped';
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+    range: 'Customers!A:Z'
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length < 4) {
+    return 'skipped';
+  }
+
+  const headerRowIndex = 2;
+  const headers = (rows[headerRowIndex] || []).map(header => String(header || '').trim().toLowerCase());
+  const getIndex = (...names) => {
+    const match = names.find(name => headers.includes(name));
+    return match ? headers.indexOf(match) : -1;
+  };
+
+  const customerIdIndex = getIndex('customer id', 'internal customer id', 'id');
+  const lastSyncIndex = getIndex('last sync', 'lastsync');
+
+  if (customerIdIndex === -1 || lastSyncIndex === -1) {
+    return 'skipped';
+  }
+
+  for (let i = headerRowIndex + 1; i < rows.length; i += 1) {
+    const row = rows[i] || [];
+    const existingCustomerId = String(row[customerIdIndex] || '').trim();
+
+    if (existingCustomerId !== String(customerId).trim()) {
+      continue;
+    }
+
+    const rowNumber = i + 1;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      range: `Customers!${String.fromCharCode(65 + lastSyncIndex)}${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[syncDate]]
+      }
+    });
+
+    return 'updated';
+  }
+
+  return 'not_found';
+}
+
+async function removeExistingReviewRowsForPeriod(sheets, customerId, periodValue) {
+  if (!customerId || !periodValue) {
+    return 0;
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+    range: 'Review Queue!A:N'
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length <= 1) {
+    return 0;
+  }
+
+  const rowsToKeep = [rows[0]];
+  let removedCount = 0;
+
+  for (let i = 1; i < rows.length; i += 1) {
+    const row = rows[i] || [];
+    const existingPeriod = String(row[1] || '').trim();
+    const existingCustomerId = String(row[4] || '').trim();
+
+    if (existingPeriod === String(periodValue).trim() && existingCustomerId === String(customerId).trim()) {
+      removedCount += 1;
+      continue;
+    }
+
+    rowsToKeep.push(row);
+  }
+
+  if (removedCount > 0) {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      range: 'Review Queue!A2:N'
+    });
+
+    if (rowsToKeep.length > 1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        range: `Review Queue!A2:N${rowsToKeep.length}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: rowsToKeep.slice(1)
+        }
+      });
+    }
+  }
+
+  return removedCount;
 }
 
 function isTokenExpiringSoon(expiresAt) {
@@ -1758,6 +1865,7 @@ app.get('/push-to-sheets', async (req, res) => {
     const state = customerMapping.state || 'UNKNOWN';
     const periodType = customerMapping.filingFrequency || 'Monthly';
     const status = totals.review_count > 0 ? 'Needs Review' : 'Ready';
+    const syncTimestamp = new Date();
 
     const filingsRow = [
       state,
@@ -1824,6 +1932,8 @@ app.get('/push-to-sheets', async (req, res) => {
       });
     }
 
+    const removedReviewRows = await removeExistingReviewRowsForPeriod(sheets, customerId, periodValue);
+
     const reviewRows = [];
     orders.forEach(order => {
       // Only include orders for this customer (prevents UNKNOWN duplicates)
@@ -1854,60 +1964,26 @@ app.get('/push-to-sheets', async (req, res) => {
 
     let reviewRowsToWrite = reviewRows;
 
-    if (reviewRows.length > 0) {
-      const reviewReadResponse = await sheets.spreadsheets.values.get({
+    if (reviewRowsToWrite.length > 0) {
+      await sheets.spreadsheets.values.append({
         spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-        range: 'Review Queue!A:N'
-      });
-
-      const existingReviewRows = reviewReadResponse.data.values || [];
-      const existingReviewKeys = new Set();
-
-      for (let i = 1; i < existingReviewRows.length; i += 1) {
-        const row = existingReviewRows[i] || [];
-        const key = [
-          row[1] || '',
-          row[5] || '',
-          row[7] || '',
-          row[8] || ''
-        ].join('|');
-        existingReviewKeys.add(key);
-      }
-
-      reviewRowsToWrite = reviewRows.filter(row => {
-        const key = [
-          row[1] || '',
-          row[5] || '',
-          row[7] || '',
-          row[8] || ''
-        ].join('|');
-
-        if (existingReviewKeys.has(key)) {
-          return false;
+        range: 'Review Queue!A:N',
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: reviewRowsToWrite
         }
-
-        existingReviewKeys.add(key);
-        return true;
       });
-
-      if (reviewRowsToWrite.length > 0) {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-          range: 'Review Queue!A:N',
-          valueInputOption: 'USER_ENTERED',
-          requestBody: {
-            values: reviewRowsToWrite
-          }
-        });
-      }
     }
+    const customerLastSyncAction = await syncCustomerLastSyncDate(sheets, customerId, syncTimestamp);
 
     res.json({
       success: true,
       message: 'Pushed filing summary to Google Sheets.',
       filings_row_written: true,
       filings_action: filingsAction,
-      review_rows_written: reviewRowsToWrite.length
+      review_rows_written: reviewRowsToWrite.length,
+      review_rows_removed: removedReviewRows,
+      customer_last_sync_action: customerLastSyncAction
     });
   } catch (err) {
     console.error('SHEETS PUSH ERROR:', err.response?.data || err.message);
