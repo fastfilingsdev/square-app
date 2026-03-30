@@ -671,6 +671,22 @@ app.get('/callback', async (req, res) => {
       connectedOn: new Date().toISOString(),
       environment: SQUARE_BASE_URL.includes('squareupsandbox.com') ? 'Sandbox' : 'Production'
     });
+    // Trigger Apps Script sync (non-blocking logic can be added later)
+    const sqCustomerSyncUrl = process.env.SQ_CUSTOMER_SYNC_URL || '';
+
+    if (sqCustomerSyncUrl) {
+      try {
+        await axios.get(sqCustomerSyncUrl, {
+          params: {
+            run: 'syncCustomers'
+          },
+          timeout: 15000
+        });
+      } catch (syncErr) {
+        console.error('SQ CUSTOMER SYNC TRIGGER ERROR:', syncErr.response?.data || syncErr.message);
+      }
+    }
+
     const customerSheetAction = await syncCustomerSquareMerchantId(
       sheets,
       stateData?.customerId || '',
