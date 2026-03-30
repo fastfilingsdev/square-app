@@ -14,6 +14,9 @@ const ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || '';
 const REDIRECT_URI = process.env.SQUARE_REDIRECT_URI || 'http://localhost:3000/callback';
 const SQUARE_VERSION = process.env.SQUARE_VERSION || '2025-02-20';
 const SQUARE_BASE_URL = process.env.SQUARE_BASE_URL || 'https://connect.squareup.com';
+const CLOVER_BASE_URL = process.env.CLOVER_BASE_URL || 'https://api.clover.com';
+const CLOVER_ACCESS_TOKEN = process.env.CLOVER_ACCESS_TOKEN || '';
+const CLOVER_MERCHANT_ID = process.env.CLOVER_MERCHANT_ID || '';
 const GOOGLE_SHEETS_SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY;
@@ -163,6 +166,69 @@ async function listSquarePayments(customerId, { start, end, locationId } = {}) {
     payments.push(...(response.data.payments || []));
     cursor = response.data.cursor;
   } while (cursor);
+
+  return payments;
+}
+
+function getCloverConfig(overrides = {}) {
+  const merchantId = String(overrides.merchantId || CLOVER_MERCHANT_ID || '').trim();
+  const accessToken = String(overrides.accessToken || CLOVER_ACCESS_TOKEN || '').trim();
+  const baseUrl = String(overrides.baseUrl || CLOVER_BASE_URL || 'https://api.clover.com').trim().replace(/\/$/, '');
+
+  if (!merchantId) {
+    throw new Error('Missing Clover merchant ID. Add CLOVER_MERCHANT_ID to .env or pass merchant_id in the query string.');
+  }
+
+  if (!accessToken) {
+    throw new Error('Missing Clover access token. Add CLOVER_ACCESS_TOKEN to .env or pass access_token in the query string.');
+  }
+
+  return { merchantId, accessToken, baseUrl };
+}
+
+function buildCloverHeaders(accessToken) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    accept: 'application/json'
+  };
+}
+
+async function listCloverPayments({ merchantId, accessToken, baseUrl, start, end, limit = 100 } = {}) {
+  const payments = [];
+  let offset = 0;
+  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 100, 1000));
+
+  const paramsBase = new URLSearchParams();
+  paramsBase.set('limit', String(normalizedLimit));
+
+  if (start) {
+    paramsBase.append('filter', `createdTime>=${new Date(`${start}T00:00:00Z`).getTime()}`);
+  }
+
+  if (end) {
+    paramsBase.append('filter', `createdTime<=${new Date(`${end}T23:59:59Z`).getTime()}`);
+  }
+
+  while (true) {
+    const params = new URLSearchParams(paramsBase.toString());
+    params.set('offset', String(offset));
+
+    const response = await axios.get(
+      `${baseUrl}/v3/merchants/${merchantId}/payments?${params.toString()}`,
+      {
+        headers: buildCloverHeaders(accessToken)
+      }
+    );
+
+    const batch = Array.isArray(response.data?.elements) ? response.data.elements : [];
+    payments.push(...batch);
+
+    if (batch.length < normalizedLimit) {
+      break;
+    }
+
+    offset += normalizedLimit;
+  }
 
   return payments;
 }
@@ -621,7 +687,7 @@ app.get('/callback', async (req, res) => {
       customers_sheet_action: customerSheetAction
     });
 
-    res.json({
+    const successPayload = {
       success: true,
       message: 'Square connected, authorization code exchanged, and connection saved successfully.',
       customer_id: stateData?.customerId || null,
@@ -631,7 +697,218 @@ app.get('/callback', async (req, res) => {
       short_lived: tokenData.short_lived || null,
       connections_sheet_action: connectionAction,
       customers_sheet_action: customerSheetAction
-    });
+    };
+
+    if (String(req.query.debug || '').toLowerCase() === 'true') {
+      return res.json(successPayload);
+    }
+
+    const customerId = stateData?.customerId || 'your account';
+    const merchantId = tokenData.merchant_id || 'Connected';
+    const customersSheetUpdated = customerSheetAction === 'updated';
+
+    return res.status(200).send(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Square Connected | Fast Filings</title>
+          <style>
+            :root {
+              --bg: #f5f7fb;
+              --card: #ffffff;
+              --text: #14213d;
+              --muted: #5f6c86;
+              --accent: #0f766e;
+              --accent-soft: #e6fffb;
+              --border: #d9e2f1;
+              --shadow: 0 20px 60px rgba(20, 33, 61, 0.12);
+            }
+
+            * {
+              box-sizing: border-box;
+            }
+
+            body {
+              margin: 0;
+              min-height: 100vh;
+              font-family: Inter, Arial, Helvetica, sans-serif;
+              background:
+                radial-gradient(circle at top, #eefbf8 0%, #f5f7fb 42%, #f5f7fb 100%);
+              color: var(--text);
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 24px;
+            }
+
+            .card {
+              width: 100%;
+              max-width: 640px;
+              background: var(--card);
+              border: 1px solid var(--border);
+              border-radius: 24px;
+              box-shadow: var(--shadow);
+              overflow: hidden;
+            }
+
+            .topbar {
+              height: 8px;
+              background: linear-gradient(90deg, #0f766e 0%, #14b8a6 100%);
+            }
+
+            .content {
+              padding: 40px 32px 32px;
+            }
+
+            .brand {
+              font-size: 14px;
+              font-weight: 700;
+              letter-spacing: 0.08em;
+              text-transform: uppercase;
+              color: var(--accent);
+              margin-bottom: 20px;
+            }
+
+            .badge {
+              display: inline-flex;
+              align-items: center;
+              gap: 10px;
+              background: var(--accent-soft);
+              color: var(--accent);
+              border: 1px solid #bff4eb;
+              border-radius: 999px;
+              padding: 10px 16px;
+              font-weight: 700;
+              font-size: 14px;
+              margin-bottom: 18px;
+            }
+
+            .badge-check {
+              width: 22px;
+              height: 22px;
+              border-radius: 50%;
+              background: var(--accent);
+              color: #fff;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              font-size: 14px;
+              line-height: 1;
+            }
+
+            h1 {
+              margin: 0 0 12px;
+              font-size: clamp(30px, 5vw, 42px);
+              line-height: 1.08;
+              letter-spacing: -0.03em;
+            }
+
+            .lead {
+              margin: 0;
+              font-size: 18px;
+              line-height: 1.65;
+              color: var(--muted);
+            }
+
+            .summary {
+              margin-top: 28px;
+              display: grid;
+              grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+              gap: 14px;
+            }
+
+            .summary-item {
+              border: 1px solid var(--border);
+              background: #fbfcfe;
+              border-radius: 16px;
+              padding: 16px 18px;
+            }
+
+            .summary-label {
+              display: block;
+              font-size: 12px;
+              font-weight: 700;
+              letter-spacing: 0.08em;
+              text-transform: uppercase;
+              color: #74819b;
+              margin-bottom: 8px;
+            }
+
+            .summary-value {
+              font-size: 17px;
+              font-weight: 700;
+              color: var(--text);
+              word-break: break-word;
+            }
+
+            .notice {
+              margin-top: 26px;
+              padding: 16px 18px;
+              border-radius: 16px;
+              background: #f8fafc;
+              border: 1px solid var(--border);
+              color: var(--muted);
+              line-height: 1.65;
+              font-size: 15px;
+            }
+
+            .notice strong {
+              color: var(--text);
+            }
+
+            .footer {
+              margin-top: 24px;
+              font-size: 14px;
+              color: #7b879c;
+            }
+
+            @media (max-width: 640px) {
+              .content {
+                padding: 32px 22px 24px;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          <main class="card">
+            <div class="topbar"></div>
+            <section class="content">
+              <div class="brand">Fast Filings</div>
+              <div class="badge">
+                <span class="badge-check">✓</span>
+                Square account connected
+              </div>
+              <h1>You're all set.</h1>
+              <p class="lead">
+                Your Square account has been successfully linked to Fast Filings. We can now continue pulling the data needed for your filing.
+              </p>
+
+              <div class="summary">
+                <div class="summary-item">
+                  <span class="summary-label">Customer ID</span>
+                  <span class="summary-value">${customerId}</span>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">Merchant ID</span>
+                  <span class="summary-value">${merchantId}</span>
+                </div>
+              </div>
+
+              <div class="notice">
+                <strong>Next step:</strong>
+                ${customersSheetUpdated
+                  ? 'your account record was matched successfully, and our system is ready to continue the filing workflow.'
+                  : 'your connection was saved successfully. Our team will finish linking it to your customer record and continue the filing workflow.'}
+              </div>
+
+              <p class="footer">You can safely close this page.</p>
+            </section>
+          </main>
+        </body>
+      </html>
+    `);
   } catch (err) {
     console.error('SQUARE TOKEN EXCHANGE ERROR:', err.response?.data || err.message);
     return res.status(500).json(err.response?.data || { error: err.message });
@@ -2024,4 +2301,39 @@ app.get('/debug-env', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+});
+
+app.get('/clover-payments', async (req, res) => {
+  try {
+    const { start, end } = resolveDateRange(req.query);
+    const cloverConfig = getCloverConfig({
+      merchantId: req.query.merchant_id,
+      accessToken: req.query.access_token,
+      baseUrl: req.query.base_url
+    });
+
+    const payments = await listCloverPayments({
+      merchantId: cloverConfig.merchantId,
+      accessToken: cloverConfig.accessToken,
+      baseUrl: cloverConfig.baseUrl,
+      start,
+      end,
+      limit: req.query.limit
+    });
+
+    res.json({
+      source: 'clover-payments-v1',
+      merchant_id: cloverConfig.merchantId,
+      period: {
+        start: start || null,
+        end: end || null,
+        period: req.query.period || null
+      },
+      count: payments.length,
+      payments
+    });
+  } catch (err) {
+    console.error('CLOVER PAYMENTS ERROR:', err.response?.data || err.message);
+    res.status(500).json(err.response?.data || { error: err.message });
+  }
 });
