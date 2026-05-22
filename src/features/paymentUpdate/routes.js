@@ -29,6 +29,9 @@ function paymentUpdateSettings(req, ticket) {
 }
 
 function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentProfileId, ticket }) {
+  const safePaymentType = escapeHtml(ticket.paymentUpdateType || 'Payment Update');
+  const safeTicketId = escapeHtml(ticket.ticketId);
+
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -37,34 +40,207 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
     <meta name="robots" content="noindex,nofollow" />
     <title>Fast Filings Secure Payment Update</title>
     <style>
-      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; font-family: Inter, Arial, Helvetica, sans-serif; background: #f5f7fb; color: #14213d; }
-      .card { width: 100%; max-width: 640px; background: #fff; border: 1px solid #d9e2f1; border-radius: 24px; box-shadow: 0 20px 60px rgba(20, 33, 61, 0.12); overflow: hidden; }
-      .topbar { height: 8px; background: linear-gradient(90deg, #0f766e 0%, #14b8a6 100%); }
-      .content { padding: 36px 30px 30px; }
-      .brand { font-size: 14px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #0f766e; margin-bottom: 18px; }
-      h1 { margin: 0 0 12px; font-size: clamp(28px, 5vw, 40px); line-height: 1.08; letter-spacing: -0.03em; }
-      p { color: #5f6c86; font-size: 17px; line-height: 1.6; }
-      .notice { margin: 22px 0; padding: 14px 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #d9e2f1; color: #5f6c86; }
-      button { background: #0f766e; color: #fff; border: 0; border-radius: 12px; padding: 13px 18px; font-weight: 800; font-size: 16px; cursor: pointer; }
-      .muted { margin-top: 18px; font-size: 13px; color: #7b879c; }
+      :root {
+        color-scheme: light;
+        --navy: #102033;
+        --muted: #607089;
+        --line: #dbe5f1;
+        --paper: #ffffff;
+        --soft: #f5f8fc;
+        --teal: #0f766e;
+        --teal-2: #14b8a6;
+        --blue: #1f5f99;
+        --gold: #f2b84b;
+        --shadow: 0 24px 70px rgba(16, 32, 51, 0.16);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, Helvetica, sans-serif;
+        background:
+          radial-gradient(circle at 20% 0%, rgba(20, 184, 166, 0.22) 0%, transparent 34%),
+          radial-gradient(circle at 90% 20%, rgba(31, 95, 153, 0.16) 0%, transparent 32%),
+          linear-gradient(135deg, #eef7f5 0%, #f7f9fc 52%, #edf3fb 100%);
+        color: var(--navy);
+      }
+      .shell { width: 100%; max-width: 920px; }
+      .trust-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 16px;
+        color: #41516a;
+        font-size: 13px;
+      }
+      .brand-lockup { display: inline-flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -0.02em; }
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 14px;
+        display: inline-grid;
+        place-items: center;
+        color: white;
+        background: linear-gradient(135deg, var(--teal) 0%, #0b5f73 100%);
+        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.25);
+        font-size: 17px;
+        font-weight: 900;
+      }
+      .brand-text span { display: block; }
+      .brand-text .small { margin-top: 2px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+      .authnet-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 13px;
+        border: 1px solid rgba(31, 95, 153, 0.18);
+        background: rgba(255, 255, 255, 0.78);
+        border-radius: 999px;
+        box-shadow: 0 8px 24px rgba(16, 32, 51, 0.08);
+        white-space: nowrap;
+      }
+      .authnet-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 5px rgba(242, 184, 75, 0.18); }
+      .authnet-name { color: var(--blue); font-weight: 900; letter-spacing: -0.01em; }
+      .card {
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(219, 229, 241, 0.95);
+        border-radius: 28px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(12px);
+      }
+      .topbar { height: 9px; background: linear-gradient(90deg, var(--teal) 0%, var(--teal-2) 48%, var(--blue) 100%); }
+      .content {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+        gap: 0;
+      }
+      .hero { padding: 42px 42px 38px; }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 11px;
+        border-radius: 999px;
+        background: #e9fbf8;
+        color: #0b665f;
+        font-size: 13px;
+        font-weight: 800;
+        margin-bottom: 18px;
+      }
+      .lock { font-size: 15px; }
+      h1 { margin: 0 0 14px; font-size: clamp(34px, 5vw, 54px); line-height: 0.98; letter-spacing: -0.055em; }
+      .lead { margin: 0; color: var(--muted); font-size: 18px; line-height: 1.62; max-width: 590px; }
+      .notice {
+        margin: 26px 0 0;
+        padding: 16px 18px;
+        border-radius: 18px;
+        background: #f8fafc;
+        border: 1px solid var(--line);
+        color: #4d5d75;
+        line-height: 1.55;
+      }
+      .notice strong { color: var(--navy); }
+      .action-panel {
+        border-left: 1px solid var(--line);
+        background:
+          linear-gradient(180deg, rgba(248, 250, 252, 0.9) 0%, rgba(255, 255, 255, 0.95) 100%);
+        padding: 42px 34px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+      .panel-title { margin: 0 0 10px; font-size: 18px; font-weight: 900; }
+      .panel-copy { margin: 0 0 22px; color: var(--muted); line-height: 1.55; }
+      button {
+        width: 100%;
+        background: linear-gradient(135deg, var(--teal) 0%, #0b5f73 100%);
+        color: #fff;
+        border: 0;
+        border-radius: 15px;
+        padding: 15px 18px;
+        font-weight: 900;
+        font-size: 16px;
+        cursor: pointer;
+        box-shadow: 0 14px 28px rgba(15, 118, 110, 0.25);
+      }
+      button:hover { filter: brightness(1.03); transform: translateY(-1px); }
+      .checklist { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 12px; }
+      .checklist li { display: flex; gap: 10px; color: #52627a; font-size: 14px; line-height: 1.45; }
+      .check { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; background: #e9fbf8; color: var(--teal); display: inline-grid; place-items: center; font-weight: 900; }
+      .footer-note {
+        border-top: 1px solid var(--line);
+        padding: 15px 42px 17px;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        color: #7a8798;
+        font-size: 12px;
+        background: rgba(248, 250, 252, 0.7);
+      }
+      @media (max-width: 760px) {
+        body { padding: 18px; align-items: flex-start; }
+        .trust-row { align-items: flex-start; flex-direction: column; }
+        .content { grid-template-columns: 1fr; }
+        .hero, .action-panel { padding: 30px 24px; }
+        .action-panel { border-left: 0; border-top: 1px solid var(--line); }
+        .footer-note { padding: 14px 24px; flex-direction: column; }
+        .authnet-badge { white-space: normal; }
+      }
     </style>
   </head>
   <body>
-    <main class="card">
-      <div class="topbar"></div>
-      <section class="content">
-        <div class="brand">Fast Filings</div>
-        <h1>Secure payment update</h1>
-        <p>Use the button below to open the secure Authorize.Net payment update page.</p>
-        <div class="notice">Fast Filings will not see or store your full card number. This page only creates a short-lived secure Authorize.Net session for this payment profile.</div>
-        <form method="post" action="${escapeHtml(acceptEditPaymentUrl)}">
-          <input type="hidden" name="token" value="${escapeHtml(hostedToken)}" />
-          <input type="hidden" name="paymentProfileId" value="${escapeHtml(paymentProfileId)}" />
-          <button type="submit">Continue to secure card update</button>
-        </form>
-        <p class="muted">Test ticket: ${escapeHtml(ticket.ticketId)} · ${escapeHtml(ticket.paymentUpdateType || 'Payment Update')}</p>
-      </section>
-    </main>
+    <div class="shell">
+      <div class="trust-row" aria-label="Payment update trust indicators">
+        <div class="brand-lockup" aria-label="Fast Filings">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Fast Filings</span>
+            <span class="small">Secure payment update</span>
+          </div>
+        </div>
+        <div class="authnet-badge" aria-label="Secured by Authorize.Net">
+          <span class="authnet-dot"></span>
+          <span>Secured by <span class="authnet-name">Authorize.Net</span></span>
+        </div>
+      </div>
+
+      <main class="card">
+        <div class="topbar"></div>
+        <section class="content">
+          <div class="hero">
+            <div class="eyebrow"><span class="lock">🔒</span> Encrypted hosted payment session</div>
+            <h1>Update your payment method securely.</h1>
+            <p class="lead">Fast Filings creates a short-lived secure session, then sends you to Authorize.Net to update the payment profile on file.</p>
+            <div class="notice"><strong>Your card details stay with Authorize.Net.</strong> Fast Filings does not see or store your full card number, CVV, or banking details on this page.</div>
+          </div>
+
+          <aside class="action-panel" aria-label="Continue to Authorize.Net">
+            <p class="panel-title">Ready to continue?</p>
+            <p class="panel-copy">You’ll leave this Fast Filings bridge page and open the secure Authorize.Net payment update form.</p>
+            <form method="post" action="${escapeHtml(acceptEditPaymentUrl)}">
+              <input type="hidden" name="token" value="${escapeHtml(hostedToken)}" />
+              <input type="hidden" name="paymentProfileId" value="${escapeHtml(paymentProfileId)}" />
+              <button type="submit">Continue to Authorize.Net</button>
+            </form>
+            <ul class="checklist" aria-label="Security details">
+              <li><span class="check">✓</span><span>One-time secure session generated when you click the link.</span></li>
+              <li><span class="check">✓</span><span>Hosted by Authorize.Net for card entry and update.</span></li>
+              <li><span class="check">✓</span><span>Fast Filings verifies the update after Authorize.Net processes it.</span></li>
+            </ul>
+          </aside>
+        </section>
+        <div class="footer-note">
+          <span>${safePaymentType}</span>
+          <span>Test ticket: ${safeTicketId}</span>
+        </div>
+      </main>
+    </div>
   </body>
 </html>`;
 }
@@ -77,17 +253,25 @@ function renderReturnHtml() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Payment Update Received | Fast Filings</title>
     <style>
-      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; font-family: Inter, Arial, Helvetica, sans-serif; background: #f5f7fb; color: #14213d; }
-      main { width: 100%; max-width: 620px; background: #fff; border: 1px solid #d9e2f1; border-radius: 24px; box-shadow: 0 20px 60px rgba(20, 33, 61, 0.12); padding: 34px; }
-      h1 { margin: 0 0 12px; }
-      p { color: #5f6c86; line-height: 1.6; }
+      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, Helvetica, sans-serif; background: linear-gradient(135deg, #eef7f5 0%, #f7f9fc 100%); color: #102033; }
+      main { width: 100%; max-width: 640px; background: #fff; border: 1px solid #dbe5f1; border-radius: 24px; box-shadow: 0 20px 60px rgba(16, 32, 51, 0.12); overflow: hidden; }
+      .topbar { height: 8px; background: linear-gradient(90deg, #0f766e 0%, #14b8a6 48%, #1f5f99 100%); }
+      .content { padding: 34px; }
+      .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 900; margin-bottom: 22px; }
+      .mark { width: 38px; height: 38px; border-radius: 13px; display: inline-grid; place-items: center; color: white; background: linear-gradient(135deg, #0f766e 0%, #0b5f73 100%); }
+      h1 { margin: 0 0 12px; font-size: clamp(30px, 5vw, 42px); letter-spacing: -0.04em; }
+      p { color: #607089; line-height: 1.65; font-size: 17px; }
     </style>
   </head>
   <body>
     <main>
-      <h1>Thank you.</h1>
-      <p>If you completed the secure Authorize.Net form, Fast Filings will verify the subscription/payment status before marking this payment update as complete.</p>
-      <p>You can safely close this page.</p>
+      <div class="topbar"></div>
+      <section class="content">
+        <div class="brand"><span class="mark">FF</span><span>Fast Filings</span></div>
+        <h1>Thank you.</h1>
+        <p>If you completed the secure Authorize.Net form, Fast Filings will verify the subscription/payment status before marking this payment update as complete.</p>
+        <p>You can safely close this page.</p>
+      </section>
     </main>
   </body>
 </html>`;
