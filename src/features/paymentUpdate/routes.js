@@ -102,12 +102,8 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         backdrop-filter: blur(12px);
       }
       .topbar { height: 9px; background: linear-gradient(90deg, var(--teal) 0%, var(--teal-2) 48%, var(--blue) 100%); }
-      .content {
-        display: grid;
-        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
-        gap: 0;
-      }
-      .hero { padding: 42px 42px 38px; }
+      .content { display: block; }
+      .hero { padding: 42px; }
       .eyebrow {
         display: inline-flex;
         align-items: center;
@@ -133,17 +129,7 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         line-height: 1.55;
       }
       .notice strong { color: var(--navy); }
-      .action-panel {
-        border-left: 1px solid var(--line);
-        background:
-          linear-gradient(180deg, rgba(248, 250, 252, 0.9) 0%, rgba(255, 255, 255, 0.95) 100%);
-        padding: 42px 34px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-      }
-      .panel-title { margin: 0 0 10px; font-size: 18px; font-weight: 900; }
-      .panel-copy { margin: 0 0 22px; color: var(--muted); line-height: 1.55; }
+      .action-stack { margin-top: 24px; max-width: 520px; }
       button {
         width: 100%;
         background: linear-gradient(135deg, var(--teal) 0%, #0b5f73 100%);
@@ -157,7 +143,7 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         box-shadow: 0 14px 28px rgba(15, 118, 110, 0.25);
       }
       button:hover { filter: brightness(1.03); transform: translateY(-1px); }
-      .checklist { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 12px; }
+      .checklist { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
       .checklist li { display: flex; gap: 10px; color: #52627a; font-size: 14px; line-height: 1.45; }
       .check { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; background: #e9fbf8; color: var(--teal); display: inline-grid; place-items: center; font-weight: 900; }
       .footer-note {
@@ -173,9 +159,8 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
       @media (max-width: 760px) {
         body { padding: 18px; align-items: flex-start; }
         .trust-row { align-items: flex-start; flex-direction: column; }
-        .content { grid-template-columns: 1fr; }
-        .hero, .action-panel { padding: 30px 24px; }
-        .action-panel { border-left: 0; border-top: 1px solid var(--line); }
+        .hero { padding: 30px 24px; }
+        .action-stack { max-width: none; }
         .footer-note { padding: 14px 24px; flex-direction: column; }
         .authnet-badge { white-space: normal; }
       }
@@ -203,23 +188,20 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
             <div class="eyebrow"><span class="lock">🔒</span> Encrypted hosted payment session</div>
             <h1>Update your payment method securely.</h1>
             <p class="lead">You’ll leave this Fast Filings page and open the secure Authorize.Net payment update form.</p>
+            <div class="action-stack" aria-label="Continue to Authorize.Net">
+              <form method="post" action="${escapeHtml(acceptEditPaymentUrl)}">
+                <input type="hidden" name="token" value="${escapeHtml(hostedToken)}" />
+                <input type="hidden" name="paymentProfileId" value="${escapeHtml(paymentProfileId)}" />
+                <button type="submit">Continue to Authorize.Net</button>
+              </form>
+              <ul class="checklist" aria-label="Security details">
+                <li><span class="check">✓</span><span>One-time secure session generated when you click the link.</span></li>
+                <li><span class="check">✓</span><span>Hosted by Authorize.Net for card entry and update.</span></li>
+                <li><span class="check">✓</span><span>Fast Filings verifies the update after Authorize.Net processes it.</span></li>
+              </ul>
+            </div>
             <div class="notice"><strong>Your card details stay with Authorize.Net.</strong> Fast Filings does not see or store your full card number, CVV, or banking details on this page.</div>
           </div>
-
-          <aside class="action-panel" aria-label="Continue to Authorize.Net">
-            <p class="panel-title">Ready to continue?</p>
-            <p class="panel-copy">You’ll leave this Fast Filings bridge page and open the secure Authorize.Net payment update form.</p>
-            <form method="post" action="${escapeHtml(acceptEditPaymentUrl)}">
-              <input type="hidden" name="token" value="${escapeHtml(hostedToken)}" />
-              <input type="hidden" name="paymentProfileId" value="${escapeHtml(paymentProfileId)}" />
-              <button type="submit">Continue to Authorize.Net</button>
-            </form>
-            <ul class="checklist" aria-label="Security details">
-              <li><span class="check">✓</span><span>One-time secure session generated when you click the link.</span></li>
-              <li><span class="check">✓</span><span>Hosted by Authorize.Net for card entry and update.</span></li>
-              <li><span class="check">✓</span><span>Fast Filings verifies the update after Authorize.Net processes it.</span></li>
-            </ul>
-          </aside>
         </section>
         <div class="footer-note">
           <span>${safePaymentType}</span>
