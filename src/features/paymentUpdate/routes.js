@@ -79,33 +79,20 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         font-size: 13px;
       }
       .brand-lockup { display: inline-flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -0.02em; }
-      .brand-mark {
-        width: 44px;
-        height: 44px;
-        border-radius: 14px;
-        display: inline-grid;
-        place-items: center;
-        color: white;
-        background: linear-gradient(135deg, var(--teal) 0%, #0b5f73 100%);
-        box-shadow: 0 10px 24px rgba(15, 118, 110, 0.25);
-        font-size: 17px;
-        font-weight: 900;
-      }
-      .brand-text span { display: block; }
-      .brand-text .small { margin-top: 2px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+      .ff-logo { display: block; width: min(260px, 54vw); height: auto; }
+      .brand-text .small { margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
       .authnet-badge {
         display: inline-flex;
         align-items: center;
         gap: 10px;
         padding: 10px 13px;
         border: 1px solid rgba(31, 95, 153, 0.18);
-        background: rgba(255, 255, 255, 0.78);
+        background: rgba(255, 255, 255, 0.82);
         border-radius: 999px;
         box-shadow: 0 8px 24px rgba(16, 32, 51, 0.08);
         white-space: nowrap;
       }
-      .authnet-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 5px rgba(242, 184, 75, 0.18); }
-      .authnet-name { color: var(--blue); font-weight: 900; letter-spacing: -0.01em; }
+      .authnet-logo { display: block; width: 156px; max-width: 36vw; height: auto; }
       .card {
         overflow: hidden;
         background: rgba(255, 255, 255, 0.92);
@@ -198,15 +185,14 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
     <div class="shell">
       <div class="trust-row" aria-label="Payment update trust indicators">
         <div class="brand-lockup" aria-label="Fast Filings">
-          <div class="brand-mark">FF</div>
           <div class="brand-text">
-            <span>Fast Filings</span>
-            <span class="small">Secure payment update</span>
+            <img class="ff-logo" src="/assets/payment-update/fast-filings-logo.png" alt="Fast Filings" />
+            <div class="small">Secure payment update</div>
           </div>
         </div>
         <div class="authnet-badge" aria-label="Secured by Authorize.Net">
-          <span class="authnet-dot"></span>
-          <span>Secured by <span class="authnet-name">Authorize.Net</span></span>
+          <span>Secured by</span>
+          <img class="authnet-logo" src="/assets/payment-update/authorize-net-logo.svg" alt="Authorize.Net" />
         </div>
       </div>
 
@@ -257,8 +243,8 @@ function renderReturnHtml() {
       main { width: 100%; max-width: 640px; background: #fff; border: 1px solid #dbe5f1; border-radius: 24px; box-shadow: 0 20px 60px rgba(16, 32, 51, 0.12); overflow: hidden; }
       .topbar { height: 8px; background: linear-gradient(90deg, #0f766e 0%, #14b8a6 48%, #1f5f99 100%); }
       .content { padding: 34px; }
-      .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 900; margin-bottom: 22px; }
-      .mark { width: 38px; height: 38px; border-radius: 13px; display: inline-grid; place-items: center; color: white; background: linear-gradient(135deg, #0f766e 0%, #0b5f73 100%); }
+      .brand { display: inline-flex; align-items: center; margin-bottom: 22px; }
+      .return-logo { display: block; width: min(250px, 70vw); height: auto; }
       h1 { margin: 0 0 12px; font-size: clamp(30px, 5vw, 42px); letter-spacing: -0.04em; }
       p { color: #607089; line-height: 1.65; font-size: 17px; }
     </style>
@@ -267,7 +253,7 @@ function renderReturnHtml() {
     <main>
       <div class="topbar"></div>
       <section class="content">
-        <div class="brand"><span class="mark">FF</span><span>Fast Filings</span></div>
+        <div class="brand"><img class="return-logo" src="/assets/payment-update/fast-filings-logo.png" alt="Fast Filings" /></div>
         <h1>Thank you.</h1>
         <p>If you completed the secure Authorize.Net form, Fast Filings will verify the subscription/payment status before marking this payment update as complete.</p>
         <p>You can safely close this page.</p>

@@ -2,11 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 
 const app = express();
 app.use(express.json());
+app.use('/assets', express.static(path.join(__dirname, 'public', 'assets'), { maxAge: '1d' }));
 
 const PORT = process.env.PORT || 3000;
 const CLIENT_ID = process.env.SQUARE_CLIENT_ID;
