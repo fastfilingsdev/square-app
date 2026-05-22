@@ -3,6 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const { google } = require('googleapis');
+const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 
 const app = express();
 app.use(express.json());
@@ -930,6 +931,8 @@ app.get('/callback', async (req, res) => {
     return res.status(500).json(err.response?.data || { error: err.message });
   }
 });
+
+app.use('/payment-update', createPaymentUpdateRouter());
 
 app.get('/', (req, res) => {
   res.send('Server is working');
