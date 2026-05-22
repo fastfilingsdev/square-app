@@ -216,7 +216,7 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
           <div class="hero">
             <div class="eyebrow"><span class="lock">🔒</span> Encrypted hosted payment session</div>
             <h1>Update your payment method securely.</h1>
-            <p class="lead">Fast Filings creates a short-lived secure session, then sends you to Authorize.Net to update the payment profile on file.</p>
+            <p class="lead">You’ll leave this Fast Filings page and open the secure Authorize.Net payment update form.</p>
             <div class="notice"><strong>Your card details stay with Authorize.Net.</strong> Fast Filings does not see or store your full card number, CVV, or banking details on this page.</div>
           </div>
 
