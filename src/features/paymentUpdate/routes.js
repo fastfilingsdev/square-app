@@ -28,7 +28,7 @@ function paymentUpdateSettings(req, ticket) {
   ];
 }
 
-function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentProfileId, ticket }) {
+function renderPaymentUpdateHtml({ ticket }) {
   const safePaymentType = escapeHtml(ticket.paymentUpdateType || 'Payment Update');
   const safeTicketId = escapeHtml(ticket.ticketId);
 
@@ -143,6 +143,9 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         box-shadow: 0 14px 28px rgba(15, 118, 110, 0.25);
       }
       button:hover { filter: brightness(1.03); transform: translateY(-1px); }
+      button:disabled { cursor: wait; opacity: 0.74; transform: none; filter: none; }
+      .status-line { min-height: 20px; margin: 11px 0 0; color: #52627a; font-size: 13px; line-height: 1.45; }
+      .status-line.error { color: #b42318; }
       .checklist { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
       .checklist li { display: flex; gap: 10px; color: #52627a; font-size: 14px; line-height: 1.45; }
       .check { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; background: #e9fbf8; color: var(--teal); display: inline-grid; place-items: center; font-weight: 900; }
@@ -189,13 +192,12 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
             <h1>Update your payment method securely.</h1>
             <p class="lead">You’ll leave this Fast Filings page and open the secure Authorize.Net payment update form.</p>
             <div class="action-stack" aria-label="Continue to Authorize.Net">
-              <form method="post" action="${escapeHtml(acceptEditPaymentUrl)}">
-                <input type="hidden" name="token" value="${escapeHtml(hostedToken)}" />
-                <input type="hidden" name="paymentProfileId" value="${escapeHtml(paymentProfileId)}" />
-                <button type="submit">Continue to Authorize.Net</button>
+              <form id="authnet-session-form">
+                <button id="continue-button" type="submit">Continue to Authorize.Net</button>
+                <div id="status-line" class="status-line" aria-live="polite"></div>
               </form>
               <ul class="checklist" aria-label="Security details">
-                <li><span class="check">✓</span><span>One-time secure session generated when you click the link.</span></li>
+                <li><span class="check">✓</span><span>One-time secure session generated after you click Continue.</span></li>
                 <li><span class="check">✓</span><span>Hosted by Authorize.Net for card entry and update.</span></li>
                 <li><span class="check">✓</span><span>Fast Filings verifies the update after Authorize.Net processes it.</span></li>
               </ul>
@@ -209,8 +211,93 @@ function renderPaymentUpdateHtml({ acceptEditPaymentUrl, hostedToken, paymentPro
         </div>
       </main>
     </div>
+    <script>
+      (function () {
+        const form = document.getElementById('authnet-session-form');
+        const button = document.getElementById('continue-button');
+        const statusLine = document.getElementById('status-line');
+
+        function setStatus(message, isError) {
+          statusLine.textContent = message || '';
+          statusLine.classList.toggle('error', Boolean(isError));
+        }
+
+        function appendHidden(targetForm, name, value) {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = name;
+          input.value = value;
+          targetForm.appendChild(input);
+        }
+
+        form.addEventListener('submit', async function (event) {
+          event.preventDefault();
+          button.disabled = true;
+          button.textContent = 'Opening secure Authorize.Net form…';
+          setStatus('Creating a one-time secure session with Authorize.Net…', false);
+
+          try {
+            const sessionUrl = window.location.pathname.replace(/\/$/, '') + '/session';
+            const response = await fetch(sessionUrl, {
+              method: 'POST',
+              headers: { Accept: 'application/json' },
+              cache: 'no-store'
+            });
+            const payload = await response.json().catch(function () { return {}; });
+            if (!response.ok || !payload.ok) {
+              throw new Error(payload.error || 'Unable to create the secure Authorize.Net session.');
+            }
+
+            const authnetForm = document.createElement('form');
+            authnetForm.method = 'post';
+            authnetForm.action = payload.acceptEditPaymentUrl;
+            appendHidden(authnetForm, 'token', payload.hostedToken);
+            appendHidden(authnetForm, 'paymentProfileId', payload.paymentProfileId);
+            document.body.appendChild(authnetForm);
+            authnetForm.submit();
+          } catch (err) {
+            button.disabled = false;
+            button.textContent = 'Continue to Authorize.Net';
+            setStatus(err.message || 'Unable to open the secure Authorize.Net form. Please try again.', true);
+          }
+        });
+      })();
+    </script>
   </body>
 </html>`;
+}
+
+async function loadValidatedPaymentUpdateTicket(ticketId, { testOnly = true } = {}) {
+  const sheets = await getSheetsClient();
+  const spreadsheetId = getPaymentUpdateSpreadsheetId();
+  const ticket = await findPaymentUpdateTicket(sheets, ticketId, spreadsheetId);
+  validatePaymentUpdateTicket(ticket, { testOnly });
+  return { sheets, spreadsheetId, ticket };
+}
+
+async function createHostedPaymentUpdateSession(req, sheets, spreadsheetId, ticket) {
+  await updatePaymentUpdateTicketAudit(sheets, ticket, { lastClickAt: true }, spreadsheetId);
+
+  const subscriptionData = await getSubscription(ticket.subscriptionId);
+  const profile = subscriptionData.subscription?.profile || {};
+  const paymentProfile = profile.paymentProfile || {};
+  const customerProfileId = String(profile.customerProfileId || '');
+  const paymentProfileId = String(paymentProfile.customerPaymentProfileId || '');
+  if (!customerProfileId || !paymentProfileId) {
+    const err = new Error('Authorize.Net profile/payment profile was not available for this subscription');
+    err.statusCode = 502;
+    throw err;
+  }
+
+  const hostedToken = await getHostedProfilePageToken(customerProfileId, paymentUpdateSettings(req, ticket));
+  await updatePaymentUpdateTicketAudit(sheets, ticket, { lastTokenGeneratedAt: true }, spreadsheetId);
+
+  const config = getAuthNetConfig();
+  return {
+    acceptEditPaymentUrl: config.acceptEditPaymentUrl,
+    hostedToken,
+    paymentProfileId
+  };
 }
 
 function renderReturnHtml() {
@@ -257,40 +344,16 @@ function createPaymentUpdateRouter() {
       authnet_configured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
       raw_tokens_stored: false,
       customer_emails_sent: false,
-      authnet_mutations: false
+      authnet_mutations: false,
+      hosted_session_timing: 'generated_after_continue_click'
     });
   });
 
   router.get('/test/:ticketId', async (req, res) => {
     try {
-      const sheets = await getSheetsClient();
-      const spreadsheetId = getPaymentUpdateSpreadsheetId();
       const ticketId = String(req.params.ticketId || '').trim();
-      const ticket = await findPaymentUpdateTicket(sheets, ticketId, spreadsheetId);
-      validatePaymentUpdateTicket(ticket, { testOnly: true });
-      await updatePaymentUpdateTicketAudit(sheets, ticket, { lastClickAt: true }, spreadsheetId);
-
-      const subscriptionData = await getSubscription(ticket.subscriptionId);
-      const profile = subscriptionData.subscription?.profile || {};
-      const paymentProfile = profile.paymentProfile || {};
-      const customerProfileId = String(profile.customerProfileId || '');
-      const paymentProfileId = String(paymentProfile.customerPaymentProfileId || '');
-      if (!customerProfileId || !paymentProfileId) {
-        const err = new Error('Authorize.Net profile/payment profile was not available for this subscription');
-        err.statusCode = 502;
-        throw err;
-      }
-
-      const hostedToken = await getHostedProfilePageToken(customerProfileId, paymentUpdateSettings(req, ticket));
-      await updatePaymentUpdateTicketAudit(sheets, ticket, { lastTokenGeneratedAt: true }, spreadsheetId);
-
-      const config = getAuthNetConfig();
-      const html = renderPaymentUpdateHtml({
-        acceptEditPaymentUrl: config.acceptEditPaymentUrl,
-        hostedToken,
-        paymentProfileId,
-        ticket
-      });
+      const { ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly: true });
+      const html = renderPaymentUpdateHtml({ ticket });
 
       res.set({
         'Content-Type': 'text/html; charset=utf-8',
@@ -302,6 +365,40 @@ function createPaymentUpdateRouter() {
     } catch (err) {
       console.error('PAYMENT UPDATE TEST ROUTE ERROR:', err.message);
       return res.status(err.statusCode || 500).send(`Payment update link error: ${escapeHtml(err.message)}`);
+    }
+  });
+
+  router.post('/test/:ticketId/session', async (req, res) => {
+    try {
+      const ticketId = String(req.params.ticketId || '').trim();
+      const { sheets, spreadsheetId, ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly: true });
+      const session = await createHostedPaymentUpdateSession(req, sheets, spreadsheetId, ticket);
+
+      res.set({
+        'Cache-Control': 'no-store, max-age=0',
+        Pragma: 'no-cache',
+        'X-Robots-Tag': 'noindex, nofollow'
+      });
+      return res.status(200).json({
+        ok: true,
+        acceptEditPaymentUrl: session.acceptEditPaymentUrl,
+        hostedToken: session.hostedToken,
+        paymentProfileId: session.paymentProfileId,
+        rawTokenStored: false,
+        customerEmailSent: false,
+        authNetMutation: false
+      });
+    } catch (err) {
+      console.error('PAYMENT UPDATE TEST SESSION ERROR:', err.message);
+      res.set({
+        'Cache-Control': 'no-store, max-age=0',
+        Pragma: 'no-cache',
+        'X-Robots-Tag': 'noindex, nofollow'
+      });
+      return res.status(err.statusCode || 500).json({
+        ok: false,
+        error: err.message || 'Unable to create the secure Authorize.Net session'
+      });
     }
   });
 
