@@ -237,7 +237,10 @@ function renderPaymentUpdateHtml({ ticket }) {
           setStatus('Creating a one-time secure session with Authorize.Net…', false);
 
           try {
-            const sessionUrl = window.location.pathname.replace(/\/$/, '') + '/session';
+            const currentPath = window.location.pathname.endsWith('/')
+              ? window.location.pathname.slice(0, -1)
+              : window.location.pathname;
+            const sessionUrl = currentPath + '/session';
             const response = await fetch(sessionUrl, {
               method: 'POST',
               headers: { Accept: 'application/json' },
