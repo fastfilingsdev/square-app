@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
+const { createSubscriptionsRouter } = require('./src/features/subscriptions/routes');
 
 const app = express();
 app.use(express.json());
@@ -935,6 +936,7 @@ app.get('/callback', async (req, res) => {
 });
 
 app.use('/payment-update', createPaymentUpdateRouter());
+app.use('/subscriptions', createSubscriptionsRouter());
 
 app.get('/', (req, res) => {
   res.send('Server is working');

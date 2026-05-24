@@ -72,5 +72,6 @@ module.exports = {
   authNetPost,
   getAuthNetConfig,
   getHostedProfilePageToken,
+  getMerchantAuthentication,
   getSubscription
 };
