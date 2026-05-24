@@ -150,10 +150,12 @@ async function authNetListPost(payload) {
   const { getMerchantAuthentication } = require('../../connectors/authnet/client');
   const merchantAuthentication = getMerchantAuthentication();
   const key = Object.keys(payload)[0];
+  // Authorize.Net's JSON/XML bridge is order-sensitive for ARB list requests.
+  // merchantAuthentication must be serialized before searchType/sorting/paging.
   return authNetPost({
     [key]: {
-      ...payload[key],
-      merchantAuthentication
+      merchantAuthentication,
+      ...payload[key]
     }
   });
 }
