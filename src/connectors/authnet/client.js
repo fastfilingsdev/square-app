@@ -5,7 +5,8 @@ function getAuthNetConfig() {
     apiLoginId: process.env.AUTHNET_API_LOGIN_ID || '',
     transactionKey: process.env.AUTHNET_TRANSACTION_KEY || '',
     apiUrl: process.env.AUTHNET_API_URL || 'https://api2.authorize.net/xml/v1/request.api',
-    acceptEditPaymentUrl: process.env.AUTHNET_ACCEPT_EDIT_PAYMENT_URL || 'https://accept.authorize.net/customer/editPayment'
+    acceptEditPaymentUrl: process.env.AUTHNET_ACCEPT_EDIT_PAYMENT_URL || 'https://accept.authorize.net/customer/editPayment',
+    acceptHostedPaymentUrl: process.env.AUTHNET_ACCEPT_HOSTED_PAYMENT_URL || 'https://accept.authorize.net/payment/payment'
   };
 }
 
@@ -68,9 +69,31 @@ async function getHostedProfilePageToken(customerProfileId, hostedProfileSetting
   return token;
 }
 
+async function getHostedPaymentPageToken(transactionRequest, hostedPaymentSettings = [], refId = '', config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  const data = await authNetPost({
+    getHostedPaymentPageRequest: {
+      merchantAuthentication,
+      ...(refId ? { refId: String(refId).slice(0, 20) } : {}),
+      transactionRequest,
+      hostedPaymentSettings: {
+        setting: hostedPaymentSettings
+      }
+    }
+  }, config);
+
+  const token = String(data.token || '');
+  if (!token) {
+    throw new Error('Authorize.Net did not return a hosted-payment token');
+  }
+
+  return token;
+}
+
 module.exports = {
   authNetPost,
   getAuthNetConfig,
+  getHostedPaymentPageToken,
   getHostedProfilePageToken,
   getMerchantAuthentication,
   getSubscription
