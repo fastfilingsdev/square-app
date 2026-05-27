@@ -301,7 +301,9 @@ function recaptureCopy(flow) {
       intro: 'Your Fast Filings Sales Tax service is almost ready. Complete this secure payment so we can activate your membership.',
       refPrefix: 'ORD',
       refLabel: 'Setup payment',
-      consent: amount => `I authorize Fast Filings to process this ${amount} payment and begin my recurring sales tax filing membership.`,
+      consent: amount => amount
+        ? `I authorize Fast Filings to process this ${amount} payment and begin my recurring sales tax filing membership.`
+        : 'I authorize Fast Filings to process this secure payment and begin my recurring sales tax filing membership.',
       button: 'Continue to secure payment',
       typeFallback: PAYMENT_UPDATE_TYPE_A
     };
@@ -313,7 +315,9 @@ function recaptureCopy(flow) {
     intro: 'Complete this secure restart payment so Fast Filings can restart your sales tax filing membership.',
     refPrefix: 'RST',
     refLabel: 'One-time restart',
-    consent: amount => `I authorize Fast Filings to process this ${amount} restart payment and use the approved payment method to resume my recurring monthly membership.`,
+    consent: amount => amount
+      ? `I authorize Fast Filings to process this ${amount} restart payment and use the approved payment method to resume my recurring monthly membership.`
+      : 'I authorize Fast Filings to process this secure restart payment and use the approved payment method to resume my recurring monthly membership.',
     button: 'Continue to secure payment',
     typeFallback: PAYMENT_UPDATE_TYPE_C
   };
@@ -323,13 +327,14 @@ function renderRecapturePaymentHtml({ ticket, sourceContext = {}, testMode = fal
   const flow = paymentFlowForTicket(ticket);
   const copy = recaptureCopy(flow);
   const amount = safeAmount(sourceContext.amountDue || sourceContext.amount || '');
-  const amountText = displayAmount(amount) || 'Secure payment';
+  const amountDisplay = displayAmount(amount);
+  const amountText = amountDisplay || 'Secure payment';
   const safeAmountText = escapeHtml(amountText);
   const safeTicketId = escapeHtml(ticket.ticketId);
   const safePaymentType = escapeHtml(ticket.paymentUpdateType || copy.typeFallback);
   const safeRef = escapeHtml(`${copy.refPrefix}-${String(ticket.subscriptionId || '').slice(0, 16)}`);
   const footerLabel = testMode ? `Test ticket: ${safeTicketId}` : `Secure link: ${safeTicketId}`;
-  const safeConsent = escapeHtml(copy.consent(amountText));
+  const safeConsent = escapeHtml(copy.consent(amountDisplay));
 
   return `<!doctype html>
 <html lang="en">
@@ -606,9 +611,18 @@ async function renderTicketHtml(req, res, { testOnly }) {
     const ticketId = String(req.params.ticketId || '').trim();
     const { sheets, spreadsheetId, ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly });
     const flow = paymentFlowForTicket(ticket);
-    const sourceContext = flow === 'new-order' || flow === 'terminated'
-      ? await loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket)
-      : null;
+    let sourceContext = null;
+    if (flow === 'new-order' || flow === 'terminated') {
+      sourceContext = await loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket);
+      if (!safeAmount(sourceContext.amountDue || sourceContext.amount || '')) {
+        const subscriptionData = await getSubscription(ticket.subscriptionId);
+        sourceContext = {
+          ...sourceContext,
+          amountDue: subscriptionData.subscription?.amount || sourceContext.amountDue || '',
+          amount: subscriptionData.subscription?.amount || sourceContext.amount || ''
+        };
+      }
+    }
     const html = flow === 'new-order' || flow === 'terminated'
       ? renderRecapturePaymentHtml({ ticket, sourceContext, testMode: testOnly })
       : renderPaymentUpdateHtml({ ticket, testMode: testOnly });
