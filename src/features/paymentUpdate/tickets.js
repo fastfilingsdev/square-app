@@ -20,6 +20,9 @@ const PAYMENT_UPDATE_TICKET_HEADERS = [
 
 const TICKETS_TAB = 'Payment Update Link Tickets';
 
+const TEST_READY_STATUSES = new Set(['Draft/Test', 'Test Link Ready']);
+const LIVE_READY_STATUSES = new Set(['Live Link Ready', 'Link Ready', 'Payment Update Link Ready']);
+
 function getPaymentUpdateSpreadsheetId() {
   const id = process.env.PAYMENT_UPDATE_SPREADSHEET_ID || process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '';
   if (!id) {
@@ -88,10 +91,14 @@ function validatePaymentUpdateTicket(ticket, { testOnly = true } = {}) {
   if (testOnly && !String(ticket.ticketId || '').startsWith('pu_test_')) {
     throw httpError('This test route only accepts test payment-update tickets', 403);
   }
+  if (!testOnly && String(ticket.ticketId || '').startsWith('pu_test_')) {
+    throw httpError('This live route does not accept test payment-update tickets', 403);
+  }
   if (ticket.revokedAt) throw httpError('This payment update link has been revoked', 410);
   if (ticket.completedAt) throw httpError('This payment update link has already been completed', 410);
-  if (!['Draft/Test', 'Test Link Ready'].includes(ticket.ticketStatus)) {
-    throw httpError('This payment update link is not ready for testing', 403);
+  const readyStatuses = testOnly ? TEST_READY_STATUSES : LIVE_READY_STATUSES;
+  if (!readyStatuses.has(ticket.ticketStatus)) {
+    throw httpError(testOnly ? 'This payment update link is not ready for testing' : 'This payment update link is not ready', 403);
   }
   if (ticket.linkExpiresAt) {
     const expiresAt = new Date(ticket.linkExpiresAt);

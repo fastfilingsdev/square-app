@@ -28,9 +28,10 @@ function paymentUpdateSettings(req, ticket) {
   ];
 }
 
-function renderPaymentUpdateHtml({ ticket }) {
+function renderPaymentUpdateHtml({ ticket, testMode = false }) {
   const safePaymentType = escapeHtml(ticket.paymentUpdateType || 'Payment Update');
   const safeTicketId = escapeHtml(ticket.ticketId);
+  const footerLabel = testMode ? `Test ticket: ${safeTicketId}` : `Secure link: ${safeTicketId}`;
 
   return `<!doctype html>
 <html lang="en">
@@ -207,7 +208,7 @@ function renderPaymentUpdateHtml({ ticket }) {
         </section>
         <div class="footer-note">
           <span>${safePaymentType}</span>
-          <span>Test ticket: ${safeTicketId}</span>
+          <span>${footerLabel}</span>
         </div>
       </main>
     </div>
@@ -342,6 +343,7 @@ function createPaymentUpdateRouter() {
     res.json({
       ok: true,
       route: '/payment-update/test/:ticketId',
+      liveRoute: '/payment-update/:ticketId',
       mode: 'test-only',
       spreadsheet_configured: Boolean(process.env.PAYMENT_UPDATE_SPREADSHEET_ID || process.env.GOOGLE_SHEETS_SPREADSHEET_ID),
       authnet_configured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
@@ -356,7 +358,7 @@ function createPaymentUpdateRouter() {
     try {
       const ticketId = String(req.params.ticketId || '').trim();
       const { ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly: true });
-      const html = renderPaymentUpdateHtml({ ticket });
+      const html = renderPaymentUpdateHtml({ ticket, testMode: true });
 
       res.set({
         'Content-Type': 'text/html; charset=utf-8',
@@ -413,6 +415,59 @@ function createPaymentUpdateRouter() {
       'X-Robots-Tag': 'noindex, nofollow'
     });
     return res.status(200).send(renderReturnHtml());
+  });
+
+  router.post('/:ticketId/session', async (req, res) => {
+    try {
+      const ticketId = String(req.params.ticketId || '').trim();
+      const { sheets, spreadsheetId, ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly: false });
+      const session = await createHostedPaymentUpdateSession(req, sheets, spreadsheetId, ticket);
+
+      res.set({
+        'Cache-Control': 'no-store, max-age=0',
+        Pragma: 'no-cache',
+        'X-Robots-Tag': 'noindex, nofollow'
+      });
+      return res.status(200).json({
+        ok: true,
+        acceptEditPaymentUrl: session.acceptEditPaymentUrl,
+        hostedToken: session.hostedToken,
+        paymentProfileId: session.paymentProfileId,
+        rawTokenStored: false,
+        customerEmailSent: false,
+        authNetMutation: false
+      });
+    } catch (err) {
+      console.error('PAYMENT UPDATE LIVE SESSION ERROR:', err.message);
+      res.set({
+        'Cache-Control': 'no-store, max-age=0',
+        Pragma: 'no-cache',
+        'X-Robots-Tag': 'noindex, nofollow'
+      });
+      return res.status(err.statusCode || 500).json({
+        ok: false,
+        error: err.message || 'Unable to create the secure Authorize.Net session'
+      });
+    }
+  });
+
+  router.get('/:ticketId', async (req, res) => {
+    try {
+      const ticketId = String(req.params.ticketId || '').trim();
+      const { ticket } = await loadValidatedPaymentUpdateTicket(ticketId, { testOnly: false });
+      const html = renderPaymentUpdateHtml({ ticket, testMode: false });
+
+      res.set({
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store, max-age=0',
+        Pragma: 'no-cache',
+        'X-Robots-Tag': 'noindex, nofollow'
+      });
+      return res.status(200).send(html);
+    } catch (err) {
+      console.error('PAYMENT UPDATE LIVE ROUTE ERROR:', err.message);
+      return res.status(err.statusCode || 500).send(`Payment update link error: ${escapeHtml(err.message)}`);
+    }
   });
 
   return router;
