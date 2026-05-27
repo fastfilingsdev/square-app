@@ -409,9 +409,7 @@ async function loadValidatedPaymentUpdateTicket(ticketId, { testOnly = true } = 
   return { sheets, spreadsheetId, ticket };
 }
 
-async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
-  const sourceTab = String(ticket.sourceTab || '').trim();
-  const sourceRow = Number(ticket.sourceRow || 0);
+async function loadSheetRowContext(sheets, spreadsheetId, tabName, rowNumber) {
   const out = {
     amountDue: '',
     amount: '',
@@ -419,6 +417,9 @@ async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
     email: '',
     notes: ''
   };
+
+  const sourceTab = String(tabName || '').trim();
+  const sourceRow = Number(rowNumber || 0);
   if (!sourceTab || !Number.isInteger(sourceRow) || sourceRow < 2 || sourceRow > 100000) return out;
 
   const response = await sheets.spreadsheets.values.get({
@@ -443,10 +444,29 @@ async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
     valueByHeader(source, 'Amount to Collect')
   );
   out.amount = out.amountDue;
-  out.customerId = valueByHeader(source, 'Customer ID');
+  out.customerId = valueByHeader(source, ['Customer ID', 'Customer ID(s)']);
   out.email = firstNonEmpty(valueByHeader(source, 'Email'), valueByHeader(source, 'Alt Email'));
   out.notes = firstNonEmpty(valueByHeader(source, 'Notes'), valueByHeader(source, 'Note'));
   return out;
+}
+
+async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
+  const [sourceContext, paymentRowContext] = await Promise.all([
+    loadSheetRowContext(sheets, spreadsheetId, ticket.sourceTab, ticket.sourceRow),
+    loadSheetRowContext(sheets, spreadsheetId, 'Payment Update', ticket.paymentUpdateRow)
+  ]);
+
+  return {
+    amountDue: firstNonEmpty(sourceContext.amountDue, paymentRowContext.amountDue),
+    amount: firstNonEmpty(sourceContext.amount, paymentRowContext.amount),
+    // A/New Order source rows do not always carry Customer ID, but the Payment Update
+    // queue can be backfilled from state Customer/Returns routing. Prefer the source
+    // row when present and fall back to the queue row so hosted recapture payments keep
+    // their state/customer route context without exposing or storing card data.
+    customerId: firstNonEmpty(sourceContext.customerId, paymentRowContext.customerId),
+    email: firstNonEmpty(sourceContext.email, paymentRowContext.email),
+    notes: firstNonEmpty(sourceContext.notes, paymentRowContext.notes)
+  };
 }
 
 function buildRecaptureTransactionRequest({ ticket, sourceContext, subscriptionData, amount, flow }) {
