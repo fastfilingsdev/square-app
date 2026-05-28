@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   __authNetWebhookTestHooks: {
+    buildEventSnapshot,
     buildWebhookLogRow,
     computeAuthNetSignature,
     normalizeHexKey,
@@ -54,4 +55,27 @@ test('webhook log row extracts support identifiers without card/payment data', (
   assert.equal(row[7], 'cust_1');
   assert.equal(row[8], 'payprof_1');
   assert.equal(row[9], 'signature-valid');
+});
+
+
+test('event snapshot omits raw card/account/token-like fields', () => {
+  const snapshot = buildEventSnapshot({
+    webhookId: 'wh_2',
+    eventType: 'net.authorize.payment.fraud.declined',
+    payload: {
+      id: 'txn_2',
+      accountNumber: 'XXXX1111',
+      cardNumber: '4111111111111111',
+      token: 'secret-token',
+      authAmount: '29.00',
+      subscription: { id: 'sub_2' }
+    }
+  });
+  const serialized = JSON.stringify(snapshot);
+  assert.equal(serialized.includes('4111111111111111'), false);
+  assert.equal(serialized.includes('secret-token'), false);
+  assert.equal(serialized.includes('XXXX1111'), false);
+  assert.equal(snapshot.payload.id, 'txn_2');
+  assert.equal(snapshot.payload.authAmount, '29.00');
+  assert.equal(snapshot.payload.subscriptionId, 'sub_2');
 });

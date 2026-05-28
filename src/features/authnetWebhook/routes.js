@@ -16,7 +16,7 @@ const WEBHOOK_LOG_HEADERS = [
   'Customer Profile ID',
   'Payment Profile ID',
   'Signature Status',
-  'Raw JSON'
+  'Sanitized Event JSON'
 ];
 
 function getWebhookSpreadsheetId() {
@@ -100,8 +100,31 @@ function firstNested(obj, paths) {
   return '';
 }
 
+function buildEventSnapshot(body) {
+  const payload = body && typeof body === 'object' ? (body.payload || {}) : {};
+  return {
+    notificationId: firstString(body && body.notificationId),
+    webhookId: firstString(body && body.webhookId, payload.webhookId),
+    eventType: firstString(body && body.eventType),
+    eventDate: firstString(body && body.eventDate),
+    payload: {
+      id: firstString(payload.id, payload.transId, firstNested(payload, ['transaction.id', 'transaction.transId', 'transaction.transactionId'])),
+      entityName: firstString(payload.entityName, firstNested(payload, ['transaction.entityName'])),
+      transactionType: firstString(payload.transactionType, firstNested(payload, ['transaction.transactionType'])),
+      transactionStatus: firstString(payload.transactionStatus, firstNested(payload, ['transaction.transactionStatus'])),
+      responseCode: firstString(payload.responseCode, firstNested(payload, ['transaction.responseCode'])),
+      authAmount: firstString(payload.authAmount, payload.settleAmount, payload.amount, firstNested(payload, ['transaction.authAmount', 'transaction.settleAmount', 'transaction.amount'])),
+      invoiceNumber: firstString(payload.invoiceNumber, firstNested(payload, ['order.invoiceNumber', 'transaction.order.invoiceNumber'])),
+      subscriptionId: firstString(payload.subscriptionId, firstNested(payload, ['subscription.id', 'transaction.subscription.id'])),
+      customerProfileId: firstString(payload.customerProfileId, firstNested(payload, ['customer.customerProfileId', 'transaction.customerProfileId'])),
+      customerPaymentProfileId: firstString(payload.customerPaymentProfileId, payload.paymentProfileId, firstNested(payload, ['customerPaymentProfileId', 'paymentProfileId', 'transaction.customerPaymentProfileId']))
+    }
+  };
+}
+
 function buildWebhookLogRow({ body, rawBody, signatureStatus, receivedAt = new Date() }) {
   const payload = body && typeof body === 'object' ? (body.payload || {}) : {};
+  const eventSnapshot = buildEventSnapshot(body || {});
   return [
     receivedAt.toISOString(),
     RECEIVER_VERSION,
@@ -113,7 +136,7 @@ function buildWebhookLogRow({ body, rawBody, signatureStatus, receivedAt = new D
     firstString(payload.customerProfileId, firstNested(payload, ['customerProfileId', 'customer.customerProfileId', 'transaction.customerProfileId'])),
     firstString(payload.customerPaymentProfileId, payload.paymentProfileId, firstNested(payload, ['customerPaymentProfileId', 'paymentProfileId', 'transaction.customerPaymentProfileId'])),
     signatureStatus || '',
-    String(rawBody || '').slice(0, 4000)
+    JSON.stringify(eventSnapshot).slice(0, 4000)
   ];
 }
 
@@ -249,6 +272,7 @@ module.exports = {
     WEBHOOK_LOG_HEADERS,
     WEBHOOK_LOG_SHEET_NAME,
     RECEIVER_VERSION,
+    buildEventSnapshot,
     buildWebhookLogRow,
     computeAuthNetSignature,
     getWebhookSpreadsheetId,
