@@ -6,9 +6,16 @@ const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 const { createSubscriptionsRouter } = require('./src/features/subscriptions/routes');
+const { createAuthNetWebhookRouter } = require('./src/features/authnetWebhook/routes');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/authnet/')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  }
+}));
 app.use('/assets', express.static(path.join(__dirname, 'public', 'assets'), { maxAge: '1d' }));
 
 const PORT = process.env.PORT || 3000;
@@ -937,6 +944,7 @@ app.get('/callback', async (req, res) => {
 
 app.use('/payment-update', createPaymentUpdateRouter());
 app.use('/subscriptions', createSubscriptionsRouter());
+app.use('/authnet', createAuthNetWebhookRouter());
 
 app.get('/', (req, res) => {
   res.send('Server is working');
