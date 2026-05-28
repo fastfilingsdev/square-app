@@ -114,14 +114,6 @@ function hostedPaymentSettings(req, ticket, amount, flow) {
       showCreditCard: true,
       showBankAccount: false
     }),
-    hostedPaymentSetting('hostedPaymentBillingAddressOptions', { show: true, required: true }),
-    hostedPaymentSetting('hostedPaymentCustomerOptions', {
-      showEmail: true,
-      requiredEmail: true,
-      // Payment-only checkout. The bridge checkbox is the explicit restart/start consent point;
-      // profile/subscription recovery remains a supervised backend step after payment verification.
-      addPaymentProfile: false
-    }),
     hostedPaymentSetting('hostedPaymentSecurityOptions', { captcha: false })
   ];
 }
