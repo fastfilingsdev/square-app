@@ -85,8 +85,15 @@ function displayAmount(amount) {
   return `$${normalized.replace(/\.00$/, '')}`;
 }
 
+function hostedReturnUrl(req, ticket, flow) {
+  // Authorize.Net Accept Hosted can render a blank "Order Summary" page when
+  // return/cancel URLs contain query strings. Keep the return context in path
+  // segments instead of `?ticket=...&flow=...`.
+  return `${getBaseUrl(req)}/payment-update/return/${encodeURIComponent(flow)}/${encodeURIComponent(ticket.ticketId)}`;
+}
+
 function paymentUpdateSettings(req, ticket) {
-  const returnUrl = `${getBaseUrl(req)}/payment-update/return?ticket=${encodeURIComponent(ticket.ticketId)}&flow=payment-update`;
+  const returnUrl = hostedReturnUrl(req, ticket, 'payment-update');
   return [
     { settingName: 'hostedProfileReturnUrl', settingValue: returnUrl },
     { settingName: 'hostedProfileReturnUrlText', settingValue: 'Return to Fast Filings' },
@@ -104,7 +111,7 @@ function hostedPaymentSetting(settingName, settingValue) {
 }
 
 function hostedPaymentSettings(req, ticket, amount, flow) {
-  const returnUrl = `${getBaseUrl(req)}/payment-update/return?ticket=${encodeURIComponent(ticket.ticketId)}&flow=${encodeURIComponent(flow)}`;
+  const returnUrl = hostedReturnUrl(req, ticket, flow);
   return [
     hostedPaymentSetting('hostedPaymentReturnOptions', {
       showReceipt: true,
@@ -598,7 +605,7 @@ async function createHostedSessionForTicket(req, sheets, spreadsheetId, ticket) 
 }
 
 function renderReturnHtml(req) {
-  const flow = String(req.query.flow || 'payment-update');
+  const flow = String(req.params.flow || req.query.flow || 'payment-update');
   const title = flow === 'new-order'
     ? 'Payment submitted.'
     : (flow === 'terminated' ? 'Restart payment submitted.' : 'Thank you.');
@@ -731,6 +738,16 @@ function createPaymentUpdateRouter() {
   router.post('/test/:ticketId/session', (req, res) => createSessionResponse(req, res, { testOnly: true }));
 
   router.get('/return', (req, res) => {
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store, max-age=0',
+      Pragma: 'no-cache',
+      'X-Robots-Tag': 'noindex, nofollow'
+    });
+    return res.status(200).send(renderReturnHtml(req));
+  });
+
+  router.get('/return/:flow/:ticketId', (req, res) => {
     res.set({
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store, max-age=0',
