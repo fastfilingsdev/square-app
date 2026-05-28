@@ -53,6 +53,13 @@ function firstNonEmpty(...values) {
   return '';
 }
 
+function splitFullName(fullName) {
+  const parts = String(fullName == null ? '' : fullName).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: '' };
+  return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
+}
+
 function valueByHeader(sourceRow, headerNames) {
   const names = Array.isArray(headerNames) ? headerNames : [headerNames];
   for (const name of names) {
@@ -112,8 +119,13 @@ function hostedPaymentSettings(req, ticket, amount, flow) {
     hostedPaymentSetting('hostedPaymentPaymentOptions', {
       cardCodeRequired: true,
       showCreditCard: true,
-      showBankAccount: false,
-      customerProfileId: false
+      showBankAccount: false
+    }),
+    hostedPaymentSetting('hostedPaymentBillingAddressOptions', { show: true, required: true }),
+    hostedPaymentSetting('hostedPaymentCustomerOptions', {
+      showEmail: true,
+      requiredEmail: true,
+      addPaymentProfile: false
     }),
     hostedPaymentSetting('hostedPaymentSecurityOptions', { captcha: false })
   ];
@@ -407,6 +419,8 @@ async function loadSheetRowContext(sheets, spreadsheetId, tabName, rowNumber) {
     amountDue: '',
     amount: '',
     customerId: '',
+    name: '',
+    billingZip: '',
     email: '',
     notes: ''
   };
@@ -438,6 +452,13 @@ async function loadSheetRowContext(sheets, spreadsheetId, tabName, rowNumber) {
   );
   out.amount = out.amountDue;
   out.customerId = valueByHeader(source, ['Customer ID', 'Customer ID(s)']);
+  out.name = firstNonEmpty(valueByHeader(source, 'Name'), valueByHeader(source, 'Full Name'));
+  out.billingZip = firstNonEmpty(
+    valueByHeader(source, 'Billing Zip'),
+    valueByHeader(source, 'Billing ZIP'),
+    valueByHeader(source, 'Zip'),
+    valueByHeader(source, 'Postal Code')
+  );
   out.email = firstNonEmpty(valueByHeader(source, 'Email'), valueByHeader(source, 'Alt Email'));
   out.notes = firstNonEmpty(valueByHeader(source, 'Notes'), valueByHeader(source, 'Note'));
   return out;
@@ -465,6 +486,7 @@ async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
 function buildRecaptureTransactionRequest({ ticket, sourceContext, subscriptionData, amount, flow }) {
   const subscription = subscriptionData.subscription || {};
   const profile = subscription.profile || {};
+  const { firstName, lastName } = splitFullName(firstNonEmpty(sourceContext.name, profile.name));
 
   const customerId = sourceContext.customerId || '';
   const statePrefix = customerId.includes('-') ? customerId.split('-', 1)[0].trim().toUpperCase() : '';
@@ -480,6 +502,13 @@ function buildRecaptureTransactionRequest({ ticket, sourceContext, subscriptionD
       invoiceNumber,
       description: description.slice(0, 255)
     },
+    ...(firstName || lastName || sourceContext.billingZip ? {
+      billTo: {
+        ...(firstName ? { firstName } : {}),
+        ...(lastName ? { lastName } : {}),
+        ...(sourceContext.billingZip ? { zip: sourceContext.billingZip } : {})
+      }
+    } : {}),
     customer: {
       email: firstNonEmpty(sourceContext.email, profile.email)
     }
