@@ -730,7 +730,10 @@ function createPaymentUpdateRouter() {
       raw_tokens_stored: false,
       customer_emails_sent: false,
       authnet_mutations_without_customer_submit: false,
-      hosted_session_timing: 'generated_after_continue_click'
+      hosted_session_timing: 'generated_after_continue_click',
+      hosted_return_url_format: 'path-no-query',
+      accept_hosted_order_summary_guard: true,
+      sample_recapture_return_url: hostedReturnUrl(req, { ticketId: 'pu_test_healthcheck' }, 'new-order')
     });
   });
 
@@ -764,5 +767,13 @@ function createPaymentUpdateRouter() {
 }
 
 module.exports = {
-  createPaymentUpdateRouter
+  createPaymentUpdateRouter,
+  __paymentUpdateTestHooks: {
+    hostedReturnUrl,
+    hostedPaymentSettings,
+    paymentUpdateSettings,
+    paymentFlowForTicket,
+    safeAmount,
+    displayAmount
+  }
 };
