@@ -112,7 +112,8 @@ function hostedPaymentSettings(req, ticket, amount, flow) {
     hostedPaymentSetting('hostedPaymentPaymentOptions', {
       cardCodeRequired: true,
       showCreditCard: true,
-      showBankAccount: false
+      showBankAccount: false,
+      customerProfileId: false
     }),
     hostedPaymentSetting('hostedPaymentSecurityOptions', { captcha: false })
   ];
