@@ -472,12 +472,6 @@ async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
 function buildRecaptureTransactionRequest({ ticket, sourceContext, subscriptionData, amount, flow }) {
   const subscription = subscriptionData.subscription || {};
   const profile = subscription.profile || {};
-  const customerProfileId = String(profile.customerProfileId || '');
-  if (!customerProfileId) {
-    const err = new Error('Authorize.Net customer profile was not available for this subscription');
-    err.statusCode = 502;
-    throw err;
-  }
 
   const customerId = sourceContext.customerId || '';
   const statePrefix = customerId.includes('-') ? customerId.split('-', 1)[0].trim().toUpperCase() : '';
@@ -489,9 +483,6 @@ function buildRecaptureTransactionRequest({ ticket, sourceContext, subscriptionD
   return {
     transactionType: 'authCaptureTransaction',
     amount,
-    profile: {
-      customerProfileId
-    },
     order: {
       invoiceNumber,
       description: description.slice(0, 255)
