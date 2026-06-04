@@ -7,7 +7,7 @@ const PAYMENT_UPDATE_TAB = 'Payment Update';
 const PAYMENT_HOLD_TAB = 'Payment on Hold';
 const TICKETS_TAB = 'Payment Update Link Tickets';
 const AUTH_TX_TAB = 'AuthNet_Transactions';
-const ACTIVE_TAB = 'Active Subscriptions';
+const RECOVERED_TAB = 'Recovered Subs';
 const STOP_WORK_TAB = 'Stop_Work_Feed';
 const EMAIL_LOG_TAB = 'Payment Update Email Log';
 
@@ -21,6 +21,12 @@ const READY_STATUSES = new Set([
   'card appears updated payment still pending verification'
 ]);
 const FINAL_STOP_VALUES = new Set(['resolved', 'completed']);
+const RECOVERED_HEADERS = [
+  'Recovered At', 'Recovery Type', 'Recovery Status', 'Active Sync Status', 'Customer ID', 'Name', 'Email', 'Alt Email',
+  'Subscription ID', 'Current Active Subscription ID', 'Old Subscription ID', 'Amount', 'Recovered Payment Transaction ID',
+  'Recovered Payment Invoice', 'Recovered Payment Date', 'Payment Update Row', 'Payment Hold Row', 'Ticket Row', 'Source Tab',
+  'Source Row', 'Existing ARB Action', 'Active Subscription Row', 'Notes', 'Last Updated At'
+];
 
 function normalize(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -306,6 +312,55 @@ async function appendRow(sheets, spreadsheetId, tabName, values) {
   });
 }
 
+function validateRecoveredHeaders(table) {
+  const actual = (table.headers || []).slice(0, RECOVERED_HEADERS.length);
+  if (actual.length < RECOVERED_HEADERS.length || actual.some((header, i) => header !== RECOVERED_HEADERS[i])) {
+    throw new Error(`${RECOVERED_TAB} headers changed or are missing; refusing webhook B auto-charge until the recovery ledger is safe`);
+  }
+}
+
+function recoveredBRowExists(recoveredRows, subscriptionId, invoiceNumber = '') {
+  return recoveredRows.some(row => {
+    if (!String(getField(row, 'Recovery Type')).includes('Payment on Hold')) return false;
+    const rowSubscriptionId = getField(row, 'Subscription ID') || getField(row, 'Current Active Subscription ID') || getField(row, 'Old Subscription ID');
+    if (String(rowSubscriptionId) !== String(subscriptionId)) return false;
+    const rowInvoice = getField(row, 'Recovered Payment Invoice');
+    return !invoiceNumber || !rowInvoice || String(rowInvoice) === String(invoiceNumber);
+  });
+}
+
+function buildRecoveredSubRow({ eventAt, puRow, holdRow, ticket, charge, invoiceNumber, amount }) {
+  const subscriptionId = getField(puRow, 'Subscription ID');
+  const note = `B Payment on Hold recovered by webhook catch-up charge; existing subscription ${subscriptionId} remains active. No replacement ARB created and no ARB canceled.`;
+  const values = {
+    'Recovered At': eventAt,
+    'Recovery Type': B_TYPE,
+    'Recovery Status': 'Recovered — B catch-up charged / existing ARB active',
+    'Active Sync Status': 'Pending Active history sync',
+    'Customer ID': getField(puRow, 'Customer ID') || getField(holdRow, 'Customer ID'),
+    'Name': getField(puRow, 'Name') || getField(holdRow, 'Name'),
+    'Email': getField(puRow, 'Email') || getField(holdRow, 'Email'),
+    'Alt Email': getField(puRow, 'Alt Email') || getField(holdRow, 'Alt Email'),
+    'Subscription ID': subscriptionId,
+    'Current Active Subscription ID': subscriptionId,
+    'Old Subscription ID': subscriptionId,
+    'Amount': displayMoney(amount),
+    'Recovered Payment Transaction ID': charge.transactionId || '',
+    'Recovered Payment Invoice': invoiceNumber,
+    'Recovered Payment Date': localDateIso(),
+    'Payment Update Row': puRow._rowNumber,
+    'Payment Hold Row': holdRow ? holdRow._rowNumber : '',
+    'Ticket Row': ticket ? ticket._rowNumber : '',
+    'Source Tab': getField(puRow, 'Source Tab') || 'Payment on Hold',
+    'Source Row': getField(puRow, 'Source Row'),
+    'Existing ARB Action': 'kept active; no replacement/cancel',
+    'Active Subscription Row': '',
+    'Notes': note,
+    'Last Updated At': eventAt
+  };
+  return RECOVERED_HEADERS.map(header => values[header] == null ? '' : String(values[header]));
+}
+
 function buildEmailLogRow({ eventAt, status, puRow, ticket, reason, mode = 'authnet-profile-webhook-b-catchup' }) {
   return [
     eventAt,
@@ -363,6 +418,7 @@ async function applyApprovedRecovery({ sheets, spreadsheetId, tables, puRow, hol
   const reason = `Authorize.Net payment profile updated; supervised B catch-up charge approved against updated card/payment profile; existing Auth.Net subscription ${subscriptionId} remains active. No replacement ARB created and no ARB canceled.`;
 
   await appendRow(sheets, spreadsheetId, AUTH_TX_TAB, buildAuthTxRow({ eventAt, charge, puRow, holdRow, invoiceNumber, amount }));
+  await appendRow(sheets, spreadsheetId, RECOVERED_TAB, buildRecoveredSubRow({ eventAt, puRow, holdRow, ticket, charge, invoiceNumber, amount }));
 
   const puValues = puRow._values.slice();
   setField(tables.paymentUpdate.headers, puValues, 'Payment Update Status', 'Completed — B catch-up charged / existing ARB active');
@@ -391,32 +447,6 @@ async function applyApprovedRecovery({ sheets, spreadsheetId, tables, puRow, hol
     await updateRow(sheets, spreadsheetId, TICKETS_TAB, tables.tickets.headers, ticket._rowNumber, ticketValues);
   }
 
-  const activeExisting = tables.active.rows.find(row => getField(row, 'Subscription ID') === subscriptionId);
-  const activeNote = `B Payment on Hold recovered by webhook catch-up charge; existing subscription ${subscriptionId} remains active.`;
-  const activeHistory = `B catch-up charge - ${localDateIso()} - tx ${charge.transactionId || '(present)'}; existing sub ${subscriptionId} kept active; no replacement/cancel.`;
-  if (activeExisting) {
-    const activeValues = activeExisting._values.slice();
-    setField(tables.active.headers, activeValues, 'Amount', displayMoney(amount));
-    setField(tables.active.headers, activeValues, 'LTV', getField(activeExisting, 'LTV') || displayMoney(amount));
-    setField(tables.active.headers, activeValues, 'Notes', appendNote(getField(activeExisting, 'Notes'), `[${eventAt}] ML: ${activeNote}`));
-    setField(tables.active.headers, activeValues, 'History', appendNote(getField(activeExisting, 'History'), activeHistory));
-    await updateRow(sheets, spreadsheetId, ACTIVE_TAB, tables.active.headers, activeExisting._rowNumber, activeValues);
-  } else {
-    await appendRow(sheets, spreadsheetId, ACTIVE_TAB, [
-      localDateIso(),
-      subscriptionId,
-      getField(puRow, 'Customer ID') || getField(holdRow, 'Customer ID'),
-      getField(puRow, 'Name') || getField(holdRow, 'Name'),
-      getField(puRow, 'Email') || getField(holdRow, 'Email'),
-      getField(puRow, 'Alt Email') || getField(holdRow, 'Alt Email'),
-      displayMoney(amount),
-      '',
-      activeNote,
-      displayMoney(amount),
-      activeHistory
-    ]);
-  }
-
   const stopRows = tables.stopWork.rows.filter(row => getField(row, 'Subscription ID') === subscriptionId || getField(row, 'Customer ID') === getField(puRow, 'Customer ID'));
   for (const stopRow of stopRows) {
     const stopValues = stopRow._values.slice();
@@ -436,7 +466,7 @@ async function applyApprovedRecovery({ sheets, spreadsheetId, tables, puRow, hol
     reason
   }));
 
-  return { status: 'charged', reason, stopRowsUpdated: stopRows.length };
+  return { status: 'charged', reason, stopRowsUpdated: stopRows.length, recoveredSubsWritten: true };
 }
 
 async function applyDeclinedRecovery({ sheets, spreadsheetId, tables, puRow, holdRow, ticket, charge, reason, eventAt }) {
@@ -518,15 +548,15 @@ async function applyPendingApprovalRecovery({ sheets, spreadsheetId, tables, puR
 }
 
 async function loadBRecoveryTables(sheets, spreadsheetId) {
-  const [paymentUpdate, paymentHold, tickets, authTx, active, stopWork] = await Promise.all([
+  const [paymentUpdate, paymentHold, tickets, authTx, recovered, stopWork] = await Promise.all([
     readTable(sheets, spreadsheetId, PAYMENT_UPDATE_TAB, 'A:V'),
     readTable(sheets, spreadsheetId, PAYMENT_HOLD_TAB, 'A:U'),
     readTable(sheets, spreadsheetId, TICKETS_TAB, 'A:Q'),
     readTable(sheets, spreadsheetId, AUTH_TX_TAB, 'A:L'),
-    readTable(sheets, spreadsheetId, ACTIVE_TAB, 'A:K'),
+    readTable(sheets, spreadsheetId, RECOVERED_TAB, 'A:X'),
     readTable(sheets, spreadsheetId, STOP_WORK_TAB, 'A:L')
   ]);
-  return { paymentUpdate, paymentHold, tickets, authTx, active, stopWork };
+  return { paymentUpdate, paymentHold, tickets, authTx, recovered, stopWork };
 }
 
 async function processBProfileUpdatedWebhook({
@@ -589,6 +619,9 @@ async function processBProfileUpdatedWebhook({
   if (invoiceExists(tables.authTx.rows, invoiceNumber)) {
     return { eligible: true, detectEnabled, chargeEnabled, status: 'skipped', subscriptionId, invoiceNumber, reason: 'invoice-already-recorded' };
   }
+  if (recoveredBRowExists(tables.recovered.rows, subscriptionId, invoiceNumber)) {
+    return { eligible: true, detectEnabled, chargeEnabled, status: 'skipped', subscriptionId, invoiceNumber, reason: 'recovered-ledger-already-recorded' };
+  }
 
   const ticket = findTicket(tables.tickets.rows, puRow);
   const eventAt = nowIso();
@@ -620,13 +653,15 @@ async function processBProfileUpdatedWebhook({
     };
   }
 
+  validateRecoveredHeaders(tables.recovered);
+
   const chargeResponse = await chargeCustomerPaymentProfileFn({
     customerProfileId: incomingProfileIds.customerProfileId,
     customerPaymentProfileId: incomingProfileIds.customerPaymentProfileId,
     amount,
     invoiceNumber,
     description: 'Fast Filings Sales Tax Filing',
-    customerEmail: getField(puRow, 'Email') || getField(holdRow, 'Email'),
+    emailCustomer: false,
     refId: `b-catchup-${subscriptionId}`
   });
   const charge = chargeSummary(chargeResponse);
@@ -656,6 +691,8 @@ async function processBProfileUpdatedWebhook({
       invoiceNumber,
       transactionIdPresent: Boolean(charge.transactionId),
       existingArbKeptActive: true,
+      recoveredSubsWritten: applied.recoveredSubsWritten,
+      authnetCustomerEmailSuppressed: true,
       stopRowsUpdated: applied.stopRowsUpdated,
       reason: applied.reason
     };
@@ -701,6 +738,7 @@ module.exports = {
     extractProfileIds,
     findMatchingBRow,
     PAYMENT_UPDATE_PENDING_STATUS,
+    RECOVERED_HEADERS,
     TICKET_PENDING_STATUS,
     isPaymentProfileUpdatedEvent,
     isReadyBRow,
