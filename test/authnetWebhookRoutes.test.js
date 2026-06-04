@@ -12,6 +12,7 @@ const {
   }
 } = require('../src/features/authnetWebhook/routes');
 const {
+  isBChargeEnabled,
   processBProfileUpdatedWebhook,
   __bRecoveryTestHooks: {
     bInvoiceNumber,
@@ -98,6 +99,19 @@ test('event snapshot omits raw card/account/token-like fields', () => {
 test('B webhook gate recognizes Authorize.Net payment profile update events only', () => {
   assert.equal(isPaymentProfileUpdatedEvent('net.authorize.customer.paymentProfile.updated'), true);
   assert.equal(isPaymentProfileUpdatedEvent('net.authorize.payment.authcapture.created'), false);
+});
+
+test('B webhook full-auto charge mode defaults on but can be forced off by env', () => {
+  const prior = process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED;
+  try {
+    delete process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED;
+    assert.equal(isBChargeEnabled(), true);
+    process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED = 'false';
+    assert.equal(isBChargeEnabled(), false);
+  } finally {
+    if (prior === undefined) delete process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED;
+    else process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED = prior;
+  }
 });
 
 test('B webhook gate extracts profile ids from sanitized Authorize.Net payloads', () => {

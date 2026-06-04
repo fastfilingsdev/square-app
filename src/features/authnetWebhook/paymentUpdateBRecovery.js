@@ -49,10 +49,10 @@ function isBDetectionEnabled() {
 }
 
 function isBChargeEnabled() {
-  // Charging is intentionally a separate hard gate. The legacy catch-up flag is
-  // not honored for live money movement, so deploying v2 cannot accidentally
-  // charge because an old env var was left behind.
-  return envFlag('AUTHNET_WEBHOOK_B_CHARGE_ENABLED', false);
+  // Gil approved Sub B full-auto mode on 2026-06-04. Charging remains isolated
+  // to this explicit B flag; the legacy catch-up flag is intentionally ignored.
+  // Render can still force the path off with AUTHNET_WEBHOOK_B_CHARGE_ENABLED=false.
+  return envFlag('AUTHNET_WEBHOOK_B_CHARGE_ENABLED', true);
 }
 
 function isPaymentProfileUpdatedEvent(eventType) {
