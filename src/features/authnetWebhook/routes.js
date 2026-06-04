@@ -8,7 +8,7 @@ const {
 } = require('./paymentUpdateBRecovery');
 
 const WEBHOOK_LOG_SHEET_NAME = 'AuthNet_Webhook_Log';
-const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v2';
+const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v3';
 
 const WEBHOOK_LOG_HEADERS = [
   'Received At',
