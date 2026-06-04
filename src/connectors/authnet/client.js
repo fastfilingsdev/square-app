@@ -90,8 +90,50 @@ async function getHostedPaymentPageToken(transactionRequest, hostedPaymentSettin
   return token;
 }
 
+async function chargeCustomerPaymentProfile({
+  customerProfileId,
+  customerPaymentProfileId,
+  amount,
+  invoiceNumber,
+  description = 'Fast Filings Sales Tax Filing',
+  customerEmail = '',
+  refId = ''
+}, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  const normalizedAmount = Number(amount);
+  if (!customerProfileId || !customerPaymentProfileId) {
+    throw new Error('Missing Authorize.Net customer/payment profile IDs for profile charge');
+  }
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+    throw new Error('Invalid Authorize.Net profile charge amount');
+  }
+
+  return authNetPost({
+    createTransactionRequest: {
+      merchantAuthentication,
+      ...(refId ? { refId: String(refId).slice(0, 20) } : {}),
+      transactionRequest: {
+        transactionType: 'authCaptureTransaction',
+        amount: normalizedAmount.toFixed(2),
+        profile: {
+          customerProfileId: String(customerProfileId),
+          paymentProfile: {
+            paymentProfileId: String(customerPaymentProfileId)
+          }
+        },
+        order: {
+          invoiceNumber: String(invoiceNumber || '').slice(0, 20),
+          description: String(description || 'Fast Filings Sales Tax Filing').slice(0, 255)
+        },
+        ...(customerEmail ? { customer: { email: String(customerEmail).slice(0, 255) } } : {})
+      }
+    }
+  }, config);
+}
+
 module.exports = {
   authNetPost,
+  chargeCustomerPaymentProfile,
   getAuthNetConfig,
   getHostedPaymentPageToken,
   getHostedProfilePageToken,

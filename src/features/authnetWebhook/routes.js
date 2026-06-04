@@ -1,9 +1,14 @@
 const crypto = require('crypto');
 const express = require('express');
 const { getSheetsClient } = require('../../core/googleSheets');
+const {
+  isBChargeEnabled,
+  isBDetectionEnabled,
+  processBProfileUpdatedWebhook
+} = require('./paymentUpdateBRecovery');
 
 const WEBHOOK_LOG_SHEET_NAME = 'AuthNet_Webhook_Log';
-const RECEIVER_VERSION = 'authnet-webhook-log-v1';
+const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v2';
 
 const WEBHOOK_LOG_HEADERS = [
   'Received At',
@@ -216,14 +221,21 @@ function createAuthNetWebhookRouter(options = {}) {
   const getSheets = options.getSheetsClient || getSheetsClient;
 
   router.get('/health', (req, res) => {
+    const bDetectionEnabled = isBDetectionEnabled();
+    const bChargeEnabled = isBChargeEnabled();
     res.json({
       ok: true,
       route: '/authnet/webhook',
       receiverVersion: RECEIVER_VERSION,
       spreadsheetConfigured: Boolean(getWebhookSpreadsheetId()),
       signatureConfigured: Boolean(getSignatureKeyHex()),
-      writes: [WEBHOOK_LOG_SHEET_NAME],
-      authnetMutations: false,
+      bDetectionEnabled,
+      bChargeEnabled,
+      legacyCatchupFlagIgnoredForCharges: Boolean(String(process.env.AUTHNET_WEBHOOK_B_CATCHUP_ENABLED || '').trim()),
+      writes: bDetectionEnabled
+        ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
+        : [WEBHOOK_LOG_SHEET_NAME],
+      authnetMutations: bChargeEnabled ? ['B profile-updated catch-up charge'] : false,
       customerEmails: false
     });
   });
@@ -260,7 +272,18 @@ function createAuthNetWebhookRouter(options = {}) {
     const row = buildWebhookLogRow({ body, rawBody, signatureStatus: verification.status });
     await appendWebhookLogRow({ sheets, spreadsheetId, row });
 
-    return res.status(200).json({ ok: true, logged: true, eventType: body.eventType || '', receiverVersion: RECEIVER_VERSION });
+    let bRecovery = { eligible: false, reason: 'not-processed' };
+    try {
+      bRecovery = await processBProfileUpdatedWebhook({ body, sheets, spreadsheetId });
+    } catch (err) {
+      // Keep the webhook receiver reliable: the sanitized support log above is
+      // already written, and Authorize.Net should not retry indefinitely because
+      // a downstream B recovery gate hit a workbook/Auth.Net issue.
+      console.error('AUTHNET WEBHOOK B RECOVERY ERROR:', err.message);
+      bRecovery = { eligible: true, enabled: true, status: 'error', reason: err.message || 'b-recovery-error' };
+    }
+
+    return res.status(200).json({ ok: true, logged: true, eventType: body.eventType || '', receiverVersion: RECEIVER_VERSION, bRecovery });
   });
 
   return router;

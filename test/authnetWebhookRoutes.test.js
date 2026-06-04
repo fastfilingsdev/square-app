@@ -10,6 +10,19 @@ const {
     verifyAuthNetSignature
   }
 } = require('../src/features/authnetWebhook/routes');
+const {
+  processBProfileUpdatedWebhook,
+  __bRecoveryTestHooks: {
+    bInvoiceNumber,
+    chargeSummary,
+    chooseHoldRow,
+    extractProfileIds,
+    findMatchingBRow,
+    isPaymentProfileUpdatedEvent,
+    isReadyBRow,
+    parseAmount
+  }
+} = require('../src/features/authnetWebhook/paymentUpdateBRecovery');
 
 const key = 'A'.repeat(128);
 
@@ -78,4 +91,233 @@ test('event snapshot omits raw card/account/token-like fields', () => {
   assert.equal(snapshot.payload.id, 'txn_2');
   assert.equal(snapshot.payload.authAmount, '29.00');
   assert.equal(snapshot.payload.subscriptionId, 'sub_2');
+});
+
+test('B webhook gate recognizes Authorize.Net payment profile update events only', () => {
+  assert.equal(isPaymentProfileUpdatedEvent('net.authorize.customer.paymentProfile.updated'), true);
+  assert.equal(isPaymentProfileUpdatedEvent('net.authorize.payment.authcapture.created'), false);
+});
+
+test('B webhook gate extracts profile ids from sanitized Authorize.Net payloads', () => {
+  const ids = extractProfileIds({
+    eventType: 'net.authorize.customer.paymentProfile.updated',
+    payload: {
+      customerProfileId: 'cust_123',
+      customerPaymentProfileId: 'pay_456'
+    }
+  });
+  assert.deepEqual(ids, { customerProfileId: 'cust_123', customerPaymentProfileId: 'pay_456' });
+});
+
+test('B recovery only treats unresolved ready B rows as eligible', () => {
+  assert.equal(isReadyBRow({
+    'Payment Update Type': 'SUB RECAPTURE B - Payment on Hold',
+    'Payment Update Status': 'Live Link Ready',
+    'Stop / Suppressed': '',
+    'Subscription ID': '71669864'
+  }), true);
+  assert.equal(isReadyBRow({
+    'Payment Update Type': 'SUB RECAPTURE B - Payment on Hold',
+    'Payment Update Status': 'Live Link Ready',
+    'Stop / Suppressed': 'Resolved',
+    'Subscription ID': '71669864'
+  }), false);
+  assert.equal(isReadyBRow({
+    'Payment Update Type': 'SUB RECAPTURE C - Terminated',
+    'Payment Update Status': 'Live Link Ready',
+    'Stop / Suppressed': '',
+    'Subscription ID': '71669864'
+  }), false);
+});
+
+test('B recovery matches a profile-updated webhook to the subscription profile currently in Auth.Net', async () => {
+  const paymentUpdateRows = [{
+    _rowNumber: 131,
+    'Payment Update Type': 'SUB RECAPTURE B - Payment on Hold',
+    'Payment Update Status': 'Live Link Ready',
+    'Stop / Suppressed': '',
+    'Subscription ID': '71669864'
+  }];
+  const match = await findMatchingBRow({
+    paymentUpdateRows,
+    profileIds: { customerProfileId: 'cust_abc', customerPaymentProfileId: 'pay_xyz' },
+    getSubscriptionFn: async subscriptionId => ({
+      subscription: {
+        status: 'active',
+        amount: '20.00',
+        profile: {
+          customerProfileId: 'cust_abc',
+          paymentProfile: { customerPaymentProfileId: 'pay_xyz' }
+        }
+      },
+      subscriptionId
+    })
+  });
+  assert.equal(match.row._rowNumber, 131);
+});
+
+test('B catch-up guards parse amount, choose latest unresolved hold row, and summarize charges safely', () => {
+  assert.equal(parseAmount('$20.00'), '20.00');
+  assert.equal(parseAmount(''), '');
+  assert.equal(chooseHoldRow([
+    { _rowNumber: 20, 'Subscription ID': 'sub_1', 'Stop / Suppressed': 'Resolved' },
+    { _rowNumber: 24, 'Subscription ID': 'sub_1', 'Stop / Suppressed': '' }
+  ], 'sub_1')._rowNumber, 24);
+  assert.equal(bInvoiceNumber('71669864', new Date('2026-06-01T20:00:00Z')), 'BUPD-71669864-0601');
+  assert.deepEqual(chargeSummary({ transactionResponse: { responseCode: '1', transId: 'txn_1', authCode: 'ok' } }).approved, true);
+});
+
+test('B webhook safe mode suppresses follow-ups without charging', async () => {
+  const updates = [];
+  const appends = [];
+  const tableValues = {
+    'Payment Update': [[
+      'Payment Update Type', 'Payment Update Status', 'Stop / Suppressed', 'Subscription ID',
+      'Customer ID', 'Name', 'Email', 'Amount Due', 'Next Follow-Up Due', 'Stop Reason', 'Notes',
+      'Source Tab', 'Source Row', 'Payment Update Link'
+    ], [
+      'SUB RECAPTURE B - Payment on Hold', 'Live Link Ready', '', '71669864',
+      'FL-58', 'Test Customer', 'customer@example.test', '', '2026-06-05', '', '',
+      'Payment on Hold', '24', 'https://fastfilings-api.onrender.com/payment-update/ticket_1'
+    ]],
+    'Payment on Hold': [[
+      'Subscription ID', 'Customer ID', 'Name', 'Email', 'Amount Due', 'Subscription Status',
+      'Last Charge Status', 'Last AuthNet Check At', 'Next Follow-Up Due', 'Stop / Suppressed', 'Stop Reason', 'Notes'
+    ], [
+      '71669864', 'FL-58', 'Test Customer', 'customer@example.test', '20', 'active',
+      'This transaction has been declined.', '', '2026-06-05', '', '', ''
+    ]],
+    'Payment Update Link Tickets': [[
+      'Ticket ID', 'Subscription ID', 'Ticket Status', 'Completed At', 'Notes'
+    ], [
+      'ticket_1', '71669864', 'Live Link Ready', '', ''
+    ]],
+    'AuthNet_Transactions': [['Invoice Number']],
+    'Active Subscriptions': [['Subscription ID']],
+    'Stop_Work_Feed': [['Subscription ID']]
+  };
+  const fakeSheets = {
+    spreadsheets: {
+      values: {
+        get: async ({ range }) => {
+          const match = String(range).match(/^'([^']+)'!/);
+          return { data: { values: tableValues[match ? match[1] : ''] || [] } };
+        },
+        update: async ({ range, requestBody }) => {
+          updates.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        },
+        append: async ({ range, requestBody }) => {
+          appends.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        }
+      }
+    }
+  };
+
+  let chargeCalled = false;
+  const result = await processBProfileUpdatedWebhook({
+    body: {
+      eventType: 'net.authorize.customer.paymentProfile.updated',
+      payload: { customerProfileId: 'cust_abc', customerPaymentProfileId: 'pay_xyz' }
+    },
+    sheets: fakeSheets,
+    spreadsheetId: 'sheet_1',
+    detectEnabled: true,
+    chargeEnabled: false,
+    getSubscriptionFn: async () => ({
+      subscription: {
+        status: 'active',
+        amount: '20.00',
+        profile: {
+          customerProfileId: 'cust_abc',
+          paymentProfile: { customerPaymentProfileId: 'pay_xyz' }
+        }
+      }
+    }),
+    chargeCustomerPaymentProfileFn: async () => {
+      chargeCalled = true;
+      throw new Error('charge should not be called in safe mode');
+    },
+    date: new Date('2026-06-04T18:00:00Z')
+  });
+
+  assert.equal(result.status, 'pending_approval');
+  assert.equal(result.authnetChargeAttempted, false);
+  assert.equal(result.customerEmails, false);
+  assert.equal(chargeCalled, false);
+  assert.equal(updates.length, 3);
+  assert.equal(appends.length, 1);
+  const paymentUpdate = updates.find(item => item.range.startsWith("'Payment Update'!"));
+  assert.ok(paymentUpdate.values.includes('Card appears updated — payment still pending verification'));
+  assert.ok(paymentUpdate.values.includes('Suppressed'));
+  assert.ok(paymentUpdate.values.includes(''));
+
+  const ticketUpdate = updates.find(item => item.range.startsWith("'Payment Update Link Tickets'!"));
+  assert.ok(ticketUpdate.values.includes('Card updated — catch-up pending'));
+});
+
+test('B webhook safe mode is idempotent for already-pending suppressed rows', async () => {
+  const updates = [];
+  const appends = [];
+  const tableValues = {
+    'Payment Update': [[
+      'Payment Update Type', 'Payment Update Status', 'Stop / Suppressed', 'Subscription ID',
+      'Customer ID', 'Name', 'Email', 'Amount Due', 'Next Follow-Up Due', 'Stop Reason', 'Notes',
+      'Source Tab', 'Source Row', 'Payment Update Link'
+    ], [
+      'SUB RECAPTURE B - Payment on Hold', 'Card appears updated — payment still pending verification', 'Suppressed', '71669864',
+      'FL-58', 'Test Customer', 'customer@example.test', '', '', 'already handled', 'prior note',
+      'Payment on Hold', '24', 'https://fastfilings-api.onrender.com/payment-update/ticket_1'
+    ]],
+    'Payment on Hold': [['Subscription ID', 'Amount Due'], ['71669864', '20']],
+    'Payment Update Link Tickets': [['Ticket ID', 'Subscription ID', 'Ticket Status']],
+    'AuthNet_Transactions': [['Invoice Number']],
+    'Active Subscriptions': [['Subscription ID']],
+    'Stop_Work_Feed': [['Subscription ID']]
+  };
+  const fakeSheets = {
+    spreadsheets: {
+      values: {
+        get: async ({ range }) => {
+          const match = String(range).match(/^'([^']+)'!/);
+          return { data: { values: tableValues[match ? match[1] : ''] || [] } };
+        },
+        update: async ({ range, requestBody }) => {
+          updates.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        },
+        append: async ({ range, requestBody }) => {
+          appends.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        }
+      }
+    }
+  };
+
+  const result = await processBProfileUpdatedWebhook({
+    body: {
+      eventType: 'net.authorize.customer.paymentProfile.updated',
+      payload: { customerProfileId: 'cust_abc', customerPaymentProfileId: 'pay_xyz' }
+    },
+    sheets: fakeSheets,
+    spreadsheetId: 'sheet_1',
+    detectEnabled: true,
+    chargeEnabled: false,
+    getSubscriptionFn: async () => ({
+      subscription: {
+        status: 'active',
+        amount: '20.00',
+        profile: {
+          customerProfileId: 'cust_abc',
+          paymentProfile: { customerPaymentProfileId: 'pay_xyz' }
+        }
+      }
+    })
+  });
+
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'already-pending-approval');
+  assert.equal(updates.length, 0);
+  assert.equal(appends.length, 0);
 });
