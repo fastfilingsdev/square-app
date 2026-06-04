@@ -8,7 +8,7 @@ const {
 } = require('./paymentUpdateBRecovery');
 
 const WEBHOOK_LOG_SHEET_NAME = 'AuthNet_Webhook_Log';
-const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v3';
+const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v4';
 
 const WEBHOOK_LOG_HEADERS = [
   'Received At',
@@ -232,9 +232,11 @@ function createAuthNetWebhookRouter(options = {}) {
       bDetectionEnabled,
       bChargeEnabled,
       legacyCatchupFlagIgnoredForCharges: Boolean(String(process.env.AUTHNET_WEBHOOK_B_CATCHUP_ENABLED || '').trim()),
-      writes: bDetectionEnabled
-        ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
-        : [WEBHOOK_LOG_SHEET_NAME],
+      writes: bChargeEnabled
+        ? [WEBHOOK_LOG_SHEET_NAME, 'AuthNet_Transactions', 'Recovered Subs', 'Payment Update B resolved rows', 'Payment on Hold resolved rows', 'Payment Update Link Tickets', 'Payment Update Email Log', 'Stop_Work_Feed']
+        : (bDetectionEnabled
+            ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
+            : [WEBHOOK_LOG_SHEET_NAME]),
       authnetMutations: bChargeEnabled ? ['B profile-updated catch-up charge'] : false,
       customerEmails: false
     });
