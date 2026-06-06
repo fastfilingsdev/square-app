@@ -89,7 +89,29 @@ function envFlag(name, defaultValue = false) {
 }
 
 function isArbAutoCreateEnabled() {
-  return envFlag('FF_BILLING_ARB_AUTO_CREATE_ENABLED', false);
+  return envFlag('FF_BILLING_ARB_AUTO_CREATE_ENABLED', true);
+}
+
+function isNewOrdersAutomationEnabled() {
+  return envFlag('FF_BILLING_NEW_ORDERS_AUTOMATION_ENABLED', true);
+}
+
+function newOrdersAutomationIntervalMs() {
+  const minutes = Number(process.env.FF_BILLING_NEW_ORDERS_AUTOMATION_INTERVAL_MINUTES || 15);
+  const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 15;
+  return Math.max(5, safeMinutes) * 60 * 1000;
+}
+
+function newOrdersAutomationLookbackDays() {
+  const days = Number(process.env.FF_BILLING_NEW_ORDERS_AUTOMATION_LOOKBACK_DAYS || 14);
+  if (!Number.isFinite(days) || days <= 0) return 14;
+  return Math.max(1, Math.min(days, 31));
+}
+
+function newOrdersAutomationMaxDetails() {
+  const max = Number(process.env.FF_BILLING_NEW_ORDERS_AUTOMATION_MAX_DETAILS || 2500);
+  if (!Number.isFinite(max) || max <= 0) return 2500;
+  return Math.max(100, Math.min(max, 5000));
 }
 
 function colLetter(n) {
@@ -293,6 +315,40 @@ function transactionProfileIds(tx) {
       || customer.customerPaymentProfileId
     )
   };
+}
+
+function transactionSubscriptionId(tx) {
+  const subscription = tx?.subscription || {};
+  return normalizeString(subscription.id || subscription.subscriptionId);
+}
+
+function transactionRecurringBilling(tx) {
+  const value = tx?.recurringBilling;
+  if (typeof value === 'boolean') return value;
+  return ['true', '1', 'yes', 'y'].includes(normalizeString(value).toLowerCase());
+}
+
+function transactionBillToName(tx) {
+  const billTo = tx?.billTo || {};
+  const first = normalizeString(billTo.firstName);
+  const last = normalizeString(billTo.lastName);
+  return [first, last].filter(Boolean).join(' ').trim();
+}
+
+function isNumericCheckoutInvoice(invoice) {
+  return /^\d{7,20}$/.test(normalizeString(invoice));
+}
+
+function isNewMembershipCheckoutTransaction(tx) {
+  const invoice = transactionInvoice(tx);
+  return Boolean(
+    isApprovedTransaction(tx)
+    && transactionId(tx)
+    && isMembershipAmount(transactionAmount(tx))
+    && isNumericCheckoutInvoice(invoice)
+    && !transactionRecurringBilling(tx)
+    && !transactionSubscriptionId(tx)
+  );
 }
 
 function sanitizeTransaction(tx, source = '') {
@@ -518,9 +574,12 @@ function validateOrderAgainstTransaction(order, tx) {
   if (sheetAmount && !isMembershipAmount(sheetAmount)) issues.push('membership amount is not 20 or 29');
   if (!txId) issues.push('missing transaction ID');
   if (!invoice) issues.push('missing invoice number');
+  if (invoice && !isNumericCheckoutInvoice(invoice)) issues.push('invoice is not a numeric checkout invoice');
   if (!txAmount) issues.push('missing transaction amount');
   if (sheetAmount && txAmount && !amountEqual(sheetAmount, txAmount)) issues.push('amount mismatch');
   if (!isApprovedTransaction(tx)) issues.push('transaction not approved/captured');
+  if (transactionRecurringBilling(tx)) issues.push('transaction is recurring billing, not a new checkout charge');
+  if (transactionSubscriptionId(tx)) issues.push('transaction already belongs to an Auth.Net subscription');
 
   return { ok: issues.length === 0, issues };
 }
@@ -570,6 +629,67 @@ function indexOnboarding(onboardingRows) {
     if (match) subIds.add(match[1]);
   });
   return { keys, subIds };
+}
+
+function valuesContainToken(values, token) {
+  const needle = normalizeString(token);
+  if (!needle) return false;
+  return (values || []).some(row => (row || []).some(cell => normalizeString(cell) === needle || normalizeString(cell).includes(needle)));
+}
+
+function discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth, now = nowIso() }) {
+  const headers = withMissingHeaders((newOrderRows[0] || []).slice(), [...NEW_ORDER_REQUIRED_HEADERS, ...NEW_ORDER_OPTIONAL_HEADERS]);
+  const map = headerMap(headers);
+  const newOrders = tableFromValues(newOrderRows);
+  const conversionIndex = indexConversions(conversionRows);
+  const existingTransactionIds = new Set();
+  const existingInvoices = new Set();
+
+  newOrders.rows.forEach(item => {
+    const txId = getCell(item.row, item.map, 'Auth.Net Transaction ID');
+    const invoice = getCell(item.row, item.map, 'Order / Invoice #');
+    if (txId) existingTransactionIds.add(txId);
+    if (invoice) existingInvoices.add(invoice.toLowerCase());
+  });
+  conversionIndex.rows.forEach(item => {
+    const txId = getCell(item.row, item.map, 'Auth.Net Transaction ID');
+    const invoice = getCell(item.row, item.map, 'Order / Invoice #');
+    const subId = getCell(item.row, item.map, 'New Subscription ID');
+    if (txId) existingTransactionIds.add(txId);
+    if (invoice) existingInvoices.add(invoice.toLowerCase());
+    if (subId) existingTransactionIds.add(subId);
+  });
+
+  const discovered = [];
+  (auth.records || []).forEach(tx => {
+    if (!isNewMembershipCheckoutTransaction(tx)) return;
+    const txId = transactionId(tx);
+    const invoice = transactionInvoice(tx);
+    if (existingTransactionIds.has(txId) || existingInvoices.has(invoice.toLowerCase())) return;
+    if (valuesContainToken(activeRows, txId) || valuesContainToken(activeRows, invoice)) return;
+    if (valuesContainToken(onboardingRows, txId) || valuesContainToken(onboardingRows, invoice)) return;
+    const row = Array(headers.length).fill('');
+    setCell(row, map, 'Time', transactionSubmitTime(tx) || now);
+    setCell(row, map, 'Name', transactionBillToName(tx));
+    setCell(row, map, 'Email', transactionEmail(tx));
+    setCell(row, map, 'Alt Email', '');
+    setCell(row, map, 'Amount', displayAmount(transactionAmount(tx)));
+    setCell(row, map, 'Order / Invoice #', invoice);
+    setCell(row, map, 'Auth.Net Transaction ID', txId);
+    setCell(row, map, 'Sub Created', '');
+    setCell(row, map, 'Payment Status', 'Auto-discovered — pending guarded conversion');
+    setCell(row, map, 'Route Target', 'Subscription Conversions');
+    setCell(row, map, 'Routed At', now);
+    setCell(row, map, 'Review Status', '');
+    setCell(row, map, 'Last AuthNet Check At', auth.pulledAtUtc || now);
+    setCell(row, map, 'Connector Notes', `AUTO DISCOVERED from Auth.Net approved checkout transaction ${txId}; guarded membership conversion pending.`);
+    discovered.push({ transactionId: txId, invoice, row: row.slice(0, headers.length), transaction: sanitizeTransaction(tx, 'authnet-auto-discovery') });
+    existingTransactionIds.add(txId);
+    existingInvoices.add(invoice.toLowerCase());
+  });
+
+  discovered.sort((a, b) => parseDateMs(a.row[map.get(normHeader('Time'))]) - parseDateMs(b.row[map.get(normHeader('Time'))]));
+  return { headers, discovered };
 }
 
 function buildConversionFields({ order, tx, status, notes = '', newSubscriptionId = '', now = nowIso() }) {
@@ -1063,7 +1183,13 @@ async function syncAuthNetNewOrders({
     pullRecentTransactions({ lookbackDays, maxDetails, requiredTransactionIds })
   ]);
 
-  const plan = buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, auth });
+  const discovery = discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth });
+  const plannedNewOrderRows = discovery.discovered.length
+    ? [discovery.headers, ...(newOrderRows || []).slice(1), ...discovery.discovered.map(item => item.row)]
+    : newOrderRows;
+
+  const plan = buildPlan({ newOrderRows: plannedNewOrderRows, conversionRows, activeRows, onboardingRows, auth });
+  plan.newOrderDiscovery = discovery.discovered;
   const arbResults = !dryRun ? await maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) : [];
 
   let applyResult = { activeApplied: false, onboardingApplied: false, onboardingNote: '', conversionAppends: 0 };
@@ -1073,7 +1199,7 @@ async function syncAuthNetNewOrders({
       billingSpreadsheetId,
       subscriptionsSpreadsheetId,
       onboardingSpreadsheetId,
-      newOrderRows,
+      newOrderRows: plannedNewOrderRows,
       conversionRows,
       plan,
       auth,
@@ -1108,6 +1234,7 @@ async function syncAuthNetNewOrders({
     },
     counts: {
       readyForConversion: plan.ready.length,
+      newOrderAutoDiscovered: plan.newOrderDiscovery.length,
       newOrderUpdates: plan.rowUpdates.length,
       conversionUpserts: plan.conversionUpserts.length,
       conversionAppends: applyResult.conversionAppends,
@@ -1123,6 +1250,7 @@ async function syncAuthNetNewOrders({
     onboardingApplied: applyResult.onboardingApplied,
     onboardingNote: applyResult.onboardingNote,
     samples: {
+      autoDiscovered: plan.newOrderDiscovery.map(item => item.transaction).slice(0, 10),
       ready: plan.ready.slice(0, 10),
       review: plan.review.slice(0, 10),
       arbResults: arbResults.slice(0, 10),
@@ -1140,11 +1268,18 @@ module.exports = {
   matchTransactionForOrder,
   validateOrderAgainstTransaction,
   isApprovedTransaction,
+  isArbAutoCreateEnabled,
+  isNewOrdersAutomationEnabled,
+  newOrdersAutomationIntervalMs,
+  newOrdersAutomationLookbackDays,
+  newOrdersAutomationMaxDetails,
   __authNetNewOrdersTestHooks: {
     addDaysDateOnly,
     amountEqual,
     buildConversionFields,
+    discoverNewOrderRows,
     isMembershipAmount,
+    isNewMembershipCheckoutTransaction,
     isTruthy,
     matchTransactionForOrder,
     parseAmount,

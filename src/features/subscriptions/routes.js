@@ -1,5 +1,25 @@
 const express = require('express');
-const { syncAuthNetNewOrders } = require('./authnetNewOrdersSync');
+const {
+  syncAuthNetNewOrders,
+  isArbAutoCreateEnabled,
+  isNewOrdersAutomationEnabled,
+  newOrdersAutomationIntervalMs,
+  newOrdersAutomationLookbackDays,
+  newOrdersAutomationMaxDetails
+} = require('./authnetNewOrdersSync');
+
+const automationState = {
+  started: false,
+  running: false,
+  timer: null,
+  initialTimer: null,
+  lastRunAtUtc: null,
+  lastSuccessAtUtc: null,
+  lastErrorAtUtc: null,
+  lastError: '',
+  lastCounts: null,
+  lastGuards: null
+};
 
 function hasValidSyncToken(req) {
   const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
@@ -23,8 +43,22 @@ function createSubscriptionsRouter() {
       billingSpreadsheetConfigured: Boolean(process.env.FF_BILLING_SPREADSHEET_ID || process.env.BILLING_SPREADSHEET_ID || '1DANHiunfffxvN7PWBxxO0WIzPWVGeOlaWMEcH-eJxBg'),
       subscriptionsSpreadsheetConfigured: Boolean(process.env.FF_SUBSCRIPTIONS_SPREADSHEET_ID || process.env.SUBSCRIPTIONS_SPREADSHEET_ID || process.env.PAYMENT_UPDATE_SPREADSHEET_ID || process.env.GOOGLE_SHEETS_SPREADSHEET_ID),
       onboardingSpreadsheetConfigured: Boolean(process.env.FF_ONBOARDING_SPREADSHEET_ID || process.env.ONBOARDING_SPREADSHEET_ID),
-      arbLiveGateEnabled: ['1', 'true', 'yes', 'on'].includes(String(process.env.FF_BILLING_ARB_AUTO_CREATE_ENABLED || '').trim().toLowerCase()),
-      safety: 'Targets FF - Billing / New Orders. Pulls Auth.Net invoice/transaction evidence and routes verified rows to Subscription Conversions. Live ARB creation requires mode=apply, arbMode=live, allowLiveArb=true, and FF_BILLING_ARB_AUTO_CREATE_ENABLED=true; otherwise no money/payment mutations.'
+      arbLiveGateEnabled: isArbAutoCreateEnabled(),
+      automation: {
+        enabled: isNewOrdersAutomationEnabled(),
+        started: automationState.started,
+        running: automationState.running,
+        intervalMs: newOrdersAutomationIntervalMs(),
+        lookbackDays: newOrdersAutomationLookbackDays(),
+        maxDetails: newOrdersAutomationMaxDetails(),
+        lastRunAtUtc: automationState.lastRunAtUtc,
+        lastSuccessAtUtc: automationState.lastSuccessAtUtc,
+        lastErrorAtUtc: automationState.lastErrorAtUtc,
+        lastError: automationState.lastError,
+        lastCounts: automationState.lastCounts,
+        lastGuards: automationState.lastGuards
+      },
+      safety: 'Targets FF - Billing / New Orders. Auto-discovers approved non-recurring $20/$29 numeric-invoice checkout transactions, blocks recurring ARB payments/declines/mismatches, creates ARBs only after verified original-charge evidence, then routes to Active Subscriptions and Onboarding. No customer emails, refunds, cancellations, or card/bank data handling.'
     });
   });
 
@@ -52,4 +86,55 @@ function createSubscriptionsRouter() {
   return router;
 }
 
-module.exports = { createSubscriptionsRouter };
+async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-automation') {
+  if (automationState.running) {
+    return { ok: true, skipped: true, reason: 'automation already running' };
+  }
+  automationState.running = true;
+  automationState.lastRunAtUtc = new Date().toISOString();
+  try {
+    const result = await syncAuthNetNewOrders({
+      mode: 'apply',
+      triggeredBy,
+      lookbackDays: newOrdersAutomationLookbackDays(),
+      maxDetails: newOrdersAutomationMaxDetails(),
+      arbMode: 'live',
+      allowLiveArb: true
+    });
+    automationState.lastSuccessAtUtc = new Date().toISOString();
+    automationState.lastError = '';
+    automationState.lastCounts = result.counts || null;
+    automationState.lastGuards = result.guards || null;
+    console.log('FF Billing New Orders automation completed', JSON.stringify({ counts: automationState.lastCounts, guards: automationState.lastGuards }));
+    return result;
+  } catch (err) {
+    automationState.lastErrorAtUtc = new Date().toISOString();
+    automationState.lastError = String(err?.message || err).slice(0, 300);
+    console.error('FF Billing New Orders automation error:', automationState.lastError);
+    return { ok: false, error: automationState.lastError };
+  } finally {
+    automationState.running = false;
+  }
+}
+
+function startNewOrdersAutomation({ initialDelayMs = 30000 } = {}) {
+  if (automationState.started) return automationState;
+  if (!isNewOrdersAutomationEnabled()) {
+    console.log('FF Billing New Orders automation disabled by FF_BILLING_NEW_ORDERS_AUTOMATION_ENABLED=false');
+    return automationState;
+  }
+  automationState.started = true;
+  const intervalMs = newOrdersAutomationIntervalMs();
+  const tick = () => runNewOrdersAutomationOnce('ff-billing-new-orders-auto').catch(err => {
+    automationState.lastErrorAtUtc = new Date().toISOString();
+    automationState.lastError = String(err?.message || err).slice(0, 300);
+  });
+  automationState.initialTimer = setTimeout(tick, Math.max(0, initialDelayMs));
+  automationState.timer = setInterval(tick, intervalMs);
+  if (automationState.initialTimer.unref) automationState.initialTimer.unref();
+  if (automationState.timer.unref) automationState.timer.unref();
+  console.log('FF Billing New Orders automation started', JSON.stringify({ intervalMs, lookbackDays: newOrdersAutomationLookbackDays(), arbLiveGateEnabled: isArbAutoCreateEnabled() }));
+  return automationState;
+}
+
+module.exports = { createSubscriptionsRouter, startNewOrdersAutomation, runNewOrdersAutomationOnce };
