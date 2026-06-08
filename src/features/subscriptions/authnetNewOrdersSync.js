@@ -710,6 +710,7 @@ function duplicateOrderUpdate(order, duplicate, auth, now) {
   return {
     rowNumber: order.rowNumber,
     fields: {
+      'Sub Created': '',
       'Payment Status': 'Duplicate — already routed',
       'Route Target': 'Duplicate / No Action',
       'Review Status': review,
@@ -1000,10 +1001,6 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
     const existingInvoice = getCell(row, m, 'Order / Invoice #');
     const identityKey = orderIdentityKey(row, m);
 
-    if (isTruthy(currentSubCreated)) {
-      skipped.push({ rowNumber: order.rowNumber, reason: 'Sub Created already checked' });
-      return;
-    }
     if (/^Duplicate\s+—\s+already routed/i.test(paymentStatus)) {
       skipped.push({ rowNumber: order.rowNumber, reason: 'Duplicate row already resolved' });
       return;
@@ -1012,6 +1009,10 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
     if (duplicate && duplicate.rowNumber !== order.rowNumber) {
       rowUpdates.push(duplicateOrderUpdate(order, duplicate, auth, now));
       skipped.push({ rowNumber: order.rowNumber, reason: `Duplicate of New Orders row ${duplicate.rowNumber}`, subscriptionId: duplicate.subscriptionId || '' });
+      return;
+    }
+    if (isTruthy(currentSubCreated)) {
+      skipped.push({ rowNumber: order.rowNumber, reason: 'Sub Created already checked' });
       return;
     }
     if (!email && !amount && !existingTxId && !existingInvoice) {

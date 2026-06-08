@@ -210,3 +210,48 @@ test('duplicate New Orders rows are resolved without another ARB attempt', () =>
   assert.match(plan.rowUpdates[0].fields['Review Status'], /73319055/);
   assert.equal(plan.skipped.some(item => item.reason === 'Duplicate of New Orders row 2'), true);
 });
+
+test('duplicate successful New Orders rows are downgraded to no-action duplicates', () => {
+  const headers = orderRows()[0];
+  const duplicateRows = [headers, [
+    'Jun 8, 2026 18:00:02', 'Fiston Mucyo', 'fiston@example.test', '', '29', '1468841394', '121662781843', 'TRUE',
+    'Subscription created', 'Active Subscriptions / Onboarding', '', '', '', 'ARB subscription 73321684 created starting 2026-07-08.'
+  ], [
+    '2026-06-08T22:00:03.1Z', 'Fiston Mucyo', 'fiston@example.test', '', '29', '1468841394', '121662781843', 'TRUE',
+    'Subscription created', 'Active Subscriptions / Onboarding', '', '', '', 'ARB subscription 73321684 created starting 2026-07-08.'
+  ]];
+  const conversionRows = [[
+    'Source New Order Row', 'Order / Invoice #', 'Auth.Net Transaction ID', 'Email', 'Customer ID', 'Amount',
+    'Desired Monthly Amount', 'First Billing Date', 'Profile Creation Status', 'ARB Creation Status',
+    'New Subscription ID', 'Approval Evidence', 'Notes', 'Name', 'Routed At', 'Last Updated At'
+  ], [
+    '2', '1468841394', '121662781843', 'fiston@example.test', '', '29', '29', '2026-07-08',
+    'Created from original transaction', 'Created', '73321684', '', 'ARB created starting 2026-07-08.', 'Fiston Mucyo', '', ''
+  ], [
+    '3', '1468841394', '121662781843', 'fiston@example.test', '', '29', '29', '2026-07-08',
+    'Created from original transaction', 'Created', '73321684', '', 'ARB created starting 2026-07-08.', 'Fiston Mucyo', '', ''
+  ]];
+
+  const plan = buildPlan({
+    newOrderRows: duplicateRows,
+    conversionRows,
+    activeRows: [['Subscription ID'], ['73321684']],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-08T22:30:00Z', records: [approvedTx({
+      transId: '121662781843',
+      authAmount: '29.00',
+      order: { invoiceNumber: '1468841394' },
+      submitTimeUTC: '2026-06-08T22:00:03.1Z',
+      customer: { email: 'fiston@example.test' }
+    })], errors: [] },
+    now: '2026-06-08T22:30:00Z'
+  });
+
+  assert.equal(plan.conversionUpserts.length, 0);
+  assert.equal(plan.rowUpdates.length, 1);
+  assert.equal(plan.rowUpdates[0].rowNumber, 3);
+  assert.equal(plan.rowUpdates[0].fields['Sub Created'], '');
+  assert.equal(plan.rowUpdates[0].fields['Payment Status'], 'Duplicate — already routed');
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /Duplicate of New Orders row 2/);
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /73321684/);
+});
