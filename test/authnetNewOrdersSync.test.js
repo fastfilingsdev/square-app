@@ -255,3 +255,25 @@ test('duplicate successful New Orders rows are downgraded to no-action duplicate
   assert.match(plan.rowUpdates[0].fields['Review Status'], /Duplicate of New Orders row 2/);
   assert.match(plan.rowUpdates[0].fields['Review Status'], /73321684/);
 });
+
+test('existing ARB failed review rows are not retried automatically', () => {
+  const rows = orderRows();
+  rows[1][5] = '1467492646';
+  rows[1][6] = '121662802867';
+  rows[1][8] = 'Review — ARB failed';
+  rows[1][9] = 'Review / Payment Issue';
+  rows[1][11] = 'ARB failed: E00100 Customer profile creation failed. This transaction type does not support profile creation.';
+
+  const plan = buildPlan({
+    newOrderRows: rows,
+    conversionRows: [['Source New Order Row', 'Auth.Net Transaction ID']],
+    activeRows: [['Subscription ID']],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-08T22:40:00Z', records: [approvedTx({ transId: '121662802867', order: { invoiceNumber: '1467492646' } })], errors: [] },
+    now: '2026-06-08T22:40:00Z'
+  });
+
+  assert.equal(plan.conversionUpserts.length, 0);
+  assert.equal(plan.rowUpdates.length, 0);
+  assert.equal(plan.skipped[0].reason, 'ARB failure already in human review; clear Payment Status to retry');
+});

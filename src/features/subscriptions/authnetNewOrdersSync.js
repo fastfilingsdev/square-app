@@ -1011,6 +1011,10 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
       skipped.push({ rowNumber: order.rowNumber, reason: `Duplicate of New Orders row ${duplicate.rowNumber}`, subscriptionId: duplicate.subscriptionId || '' });
       return;
     }
+    if (/^Review\s+—\s+ARB failed/i.test(paymentStatus)) {
+      skipped.push({ rowNumber: order.rowNumber, reason: 'ARB failure already in human review; clear Payment Status to retry' });
+      return;
+    }
     if (isTruthy(currentSubCreated)) {
       skipped.push({ rowNumber: order.rowNumber, reason: 'Sub Created already checked' });
       return;
