@@ -4,6 +4,10 @@ const {
   getTransactionDetails,
   getTransactionListForCustomer
 } = require('../../connectors/authnet/client');
+const {
+  isRecoveredActiveSyncEnabled,
+  syncRecoveredSubsToActive
+} = require('../subscriptions/recoveredActiveSync');
 
 const PAYMENT_UPDATE_TAB = 'Payment Update';
 const PAYMENT_HOLD_TAB = 'Payment on Hold';
@@ -663,8 +667,10 @@ async function processBProfileUpdatedWebhook({
   spreadsheetId,
   detectEnabled = isBDetectionEnabled(),
   chargeEnabled = isBChargeEnabled(),
+  activeSyncEnabled = isRecoveredActiveSyncEnabled(),
   getSubscriptionFn = getSubscription,
   chargeCustomerPaymentProfileFn = chargeCustomerPaymentProfile,
+  syncRecoveredSubsToActiveFn = syncRecoveredSubsToActive,
   date = new Date()
 }) {
   const eventType = body && body.eventType;
@@ -777,6 +783,24 @@ async function processBProfileUpdatedWebhook({
       amount,
       eventAt
     });
+    let activeSync = { enabled: Boolean(activeSyncEnabled), skipped: !activeSyncEnabled, reason: activeSyncEnabled ? '' : 'recovered-active-sync-disabled' };
+    if (activeSyncEnabled) {
+      try {
+        activeSync = await syncRecoveredSubsToActiveFn({
+          sheets,
+          spreadsheetId,
+          mode: 'apply',
+          triggeredBy: 'authnet-b-recovery-immediate',
+          onlySubscriptionIds: [subscriptionId],
+          getSubscriptionFn
+        });
+      } catch (err) {
+        // The charge and recovery ledger have already succeeded. Do not make
+        // Authorize.Net retry the webhook or duplicate the money path just
+        // because the presentation sync hit a Sheets/Auth.Net read issue.
+        activeSync = { ok: false, enabled: true, status: 'error', error: String(err?.message || err).slice(0, 300) };
+      }
+    }
     return {
       eligible: true,
       detectEnabled,
@@ -790,6 +814,7 @@ async function processBProfileUpdatedWebhook({
       transactionIdPresent: Boolean(charge.transactionId),
       existingArbKeptActive: true,
       recoveredSubsWritten: applied.recoveredSubsWritten,
+      activeSync,
       authnetCustomerEmailSuppressed: true,
       stopRowsUpdated: applied.stopRowsUpdated,
       reason: applied.reason
@@ -878,6 +903,7 @@ async function runBValidationFallback({
   const skipped = [];
   const errors = [];
   let chargedCount = 0;
+  let activeSyncedCount = 0;
 
   for (const puRow of readyRows) {
     const subscriptionId = getField(puRow, 'Subscription ID');
@@ -968,6 +994,7 @@ async function runBValidationFallback({
         });
         action.recovery = recovery;
         if (recovery?.status === 'charged') chargedCount += 1;
+        if (recovery?.activeSync?.counts?.synced) activeSyncedCount += Number(recovery.activeSync.counts.synced) || 0;
       }
       actions.push(action);
     } catch (err) {
@@ -989,6 +1016,7 @@ async function runBValidationFallback({
     counts: {
       actions: actions.length,
       charged: chargedCount,
+      activeSynced: activeSyncedCount,
       skipped: skipped.length,
       errors: errors.length
     },

@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
-const { createSubscriptionsRouter, startNewOrdersAutomation } = require('./src/features/subscriptions/routes');
+const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation } = require('./src/features/authnetWebhook/routes');
 
 const app = express();
@@ -2334,6 +2334,7 @@ app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   startNewOrdersAutomation();
   startAuthNetBFallbackAutomation();
+  startRecoveredActiveSyncAutomation();
 });
 
 app.get('/clover-payments', async (req, res) => {

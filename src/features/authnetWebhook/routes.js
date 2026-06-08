@@ -260,7 +260,7 @@ function createAuthNetWebhookRouter(options = {}) {
       bChargeEnabled,
       legacyCatchupFlagIgnoredForCharges: Boolean(String(process.env.AUTHNET_WEBHOOK_B_CATCHUP_ENABLED || '').trim()),
       writes: bChargeEnabled
-        ? [WEBHOOK_LOG_SHEET_NAME, 'AuthNet_Transactions', 'Recovered Subs', 'Payment Update B resolved rows', 'Payment on Hold resolved rows', 'Payment Update Link Tickets', 'Payment Update Email Log', 'Stop_Work_Feed']
+        ? [WEBHOOK_LOG_SHEET_NAME, 'AuthNet_Transactions', 'Recovered Subs', 'Active Subscriptions presentation sync', 'Payment Update B resolved rows', 'Payment on Hold resolved rows', 'Payment Update Link Tickets', 'Payment Update Email Log', 'Stop_Work_Feed']
         : (bDetectionEnabled
             ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
             : [WEBHOOK_LOG_SHEET_NAME]),

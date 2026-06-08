@@ -27,6 +27,9 @@ const {
     RECOVERED_HEADERS
   }
 } = require('../src/features/authnetWebhook/paymentUpdateBRecovery');
+const {
+  syncRecoveredSubsToActive
+} = require('../src/features/subscriptions/recoveredActiveSync');
 
 const key = 'A'.repeat(128);
 
@@ -403,6 +406,7 @@ test('B webhook charge mode charges once without Auth.Net customer email and wri
   };
 
   let chargeArgs;
+  let activeSyncArgs;
   const result = await processBProfileUpdatedWebhook({
     body: {
       eventType: 'net.authorize.customer.paymentProfile.updated',
@@ -426,6 +430,10 @@ test('B webhook charge mode charges once without Auth.Net customer email and wri
       chargeArgs = args;
       return { transactionResponse: { responseCode: '1', transId: 'txn_1', authCode: 'auth_ok', messages: [{ description: 'Approved' }] } };
     },
+    syncRecoveredSubsToActiveFn: async args => {
+      activeSyncArgs = args;
+      return { ok: true, mode: 'APPLY', targetCount: 1, counts: { synced: 1, inserted: 1, updated: 0, errors: 0 } };
+    },
     date: new Date('2026-06-04T18:00:00Z')
   });
 
@@ -435,6 +443,9 @@ test('B webhook charge mode charges once without Auth.Net customer email and wri
   assert.equal(chargeArgs.emailCustomer, false);
   assert.equal(Object.prototype.hasOwnProperty.call(chargeArgs, 'customerEmail'), false);
   assert.equal(chargeArgs.invoiceNumber, 'BUPD-71669864-0604');
+  assert.equal(activeSyncArgs.mode, 'apply');
+  assert.deepEqual(activeSyncArgs.onlySubscriptionIds, ['71669864']);
+  assert.equal(result.activeSync.counts.synced, 1);
 
   const appendRanges = appends.map(item => item.range);
   assert.equal(appendRanges.some(range => range.startsWith("'Active Subscriptions'!")), false);
@@ -609,4 +620,83 @@ test('B fallback audit detects post-click $0.01 validations without sheet writes
   assert.equal(result.actions[0].validation.authAmount, 0.01);
   assert.equal(updates.length, 0);
   assert.equal(appends.length, 0);
+});
+
+test('Recovered Subs sync inserts pending recovered B rows into Active Subscriptions history', async () => {
+  const updates = [];
+  const batchUpdates = [];
+  const recoveredRow = RECOVERED_HEADERS.map(header => ({
+    'Recovered At': '2026-06-08T19:56:00.000Z',
+    'Recovery Type': 'SUB RECAPTURE B - Payment on Hold',
+    'Recovery Status': 'Recovered — B catch-up charged / existing ARB active',
+    'Active Sync Status': 'Pending Active history sync',
+    'Customer ID': 'FL-93',
+    'Name': 'Test Customer',
+    'Email': 'customer@example.test',
+    'Alt Email': '',
+    'Subscription ID': '72701926',
+    'Current Active Subscription ID': '72701926',
+    'Old Subscription ID': '72701926',
+    'Amount': '20',
+    'Recovered Payment Transaction ID': 'txn_recovered',
+    'Recovered Payment Invoice': 'BUPD-72701926-0608',
+    'Recovered Payment Date': '2026-06-08',
+    'Notes': 'B recovered; existing ARB active.'
+  })[header] || '');
+  const tableValues = {
+    'Recovered Subs': [RECOVERED_HEADERS, recoveredRow],
+    'Active Subscriptions': [[
+      'Date', 'Subscription ID', 'Customer ID', 'Name', 'Email', 'Alt Email', 'Amount', 'Unused', 'Notes', 'LTV'
+    ]]
+  };
+  const fakeSheets = {
+    spreadsheets: {
+      get: async () => ({ data: { sheets: [{ properties: { title: 'Active Subscriptions', sheetId: 123 } }] } }),
+      batchUpdate: async ({ requestBody }) => {
+        batchUpdates.push(requestBody.requests);
+        return { data: {} };
+      },
+      values: {
+        get: async ({ range }) => {
+          const match = String(range).match(/^'([^']+)'!/);
+          return { data: { values: tableValues[match ? match[1] : ''] || [] } };
+        },
+        update: async ({ range, requestBody }) => {
+          updates.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        }
+      }
+    }
+  };
+
+  const result = await syncRecoveredSubsToActive({
+    sheets: fakeSheets,
+    spreadsheetId: 'sheet_1',
+    mode: 'apply',
+    onlySubscriptionIds: ['72701926'],
+    getSubscriptionFn: async () => ({
+      subscription: {
+        status: 'active',
+        amount: '20.00',
+        arbTransactions: [{
+          response: 'Approved',
+          transId: 'txn_first',
+          payNum: '1',
+          submitTimeUTC: '2026-04-11T00:00:00.000Z',
+          amount: '20.00'
+        }]
+      }
+    })
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.counts.synced, 1);
+  assert.equal(result.actions[0].activeAction, 'inserted new row');
+  const activeUpdate = updates.find(item => item.range.startsWith("'Active Subscriptions'!A2:"));
+  assert.ok(activeUpdate.values.includes('FL-93'));
+  assert.ok(activeUpdate.values.includes('1st - 2026-04-11 - txn_first'));
+  assert.ok(activeUpdate.values.includes('Recovered B - 2026-06-08 - txn_recovered'));
+  assert.ok(updates.find(item => item.range.startsWith("'Recovered Subs'!")).values.includes('Synced to Active history'));
+  assert.ok(batchUpdates.flat().some(request => request.insertDimension));
+  assert.ok(batchUpdates.flat().some(request => request.repeatCell));
 });

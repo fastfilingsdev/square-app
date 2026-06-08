@@ -1,4 +1,5 @@
 const express = require('express');
+const { getSheetsClient } = require('../../core/googleSheets');
 const {
   syncAuthNetNewOrders,
   isArbAutoCreateEnabled,
@@ -7,6 +8,13 @@ const {
   newOrdersAutomationLookbackDays,
   newOrdersAutomationMaxDetails
 } = require('./authnetNewOrdersSync');
+const {
+  getSubscriptionsSpreadsheetId,
+  isRecoveredActiveSyncEnabled,
+  recoveredActiveSyncIntervalMs,
+  recoveredActiveSyncMaxRows,
+  syncRecoveredSubsToActive
+} = require('./recoveredActiveSync');
 
 const automationState = {
   started: false,
@@ -19,6 +27,18 @@ const automationState = {
   lastError: '',
   lastCounts: null,
   lastGuards: null
+};
+
+const recoveredActiveSyncState = {
+  started: false,
+  running: false,
+  timer: null,
+  initialTimer: null,
+  lastRunAtUtc: null,
+  lastSuccessAtUtc: null,
+  lastErrorAtUtc: null,
+  lastError: '',
+  lastCounts: null
 };
 
 function hasValidSyncToken(req) {
@@ -83,6 +103,59 @@ function createSubscriptionsRouter() {
     }
   });
 
+  router.get('/recovered/active-sync/health', (req, res) => {
+    res.json({
+      ok: true,
+      route: '/subscriptions/recovered/active-sync',
+      authRequired: true,
+      authConfigured: Boolean(process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN),
+      authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
+      subscriptionsSpreadsheetConfigured: Boolean(getSubscriptionsSpreadsheetId()),
+      automation: {
+        enabled: isRecoveredActiveSyncEnabled(),
+        started: recoveredActiveSyncState.started,
+        running: recoveredActiveSyncState.running,
+        intervalMs: recoveredActiveSyncIntervalMs(),
+        maxRows: recoveredActiveSyncMaxRows(),
+        lastRunAtUtc: recoveredActiveSyncState.lastRunAtUtc,
+        lastSuccessAtUtc: recoveredActiveSyncState.lastSuccessAtUtc,
+        lastErrorAtUtc: recoveredActiveSyncState.lastErrorAtUtc,
+        lastError: recoveredActiveSyncState.lastError,
+        lastCounts: recoveredActiveSyncState.lastCounts
+      },
+      safety: 'Recovered Subs → Active Subscriptions presentation sync only. Auth.Net access is read-only subscription history; no Auth.Net mutations, no customer emails, no raw card/bank/profile data, and no Returns operational edits.'
+    });
+  });
+
+  router.post('/recovered/active-sync', async (req, res) => {
+    if (!hasValidSyncToken(req)) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized recovered active sync request' });
+    }
+
+    try {
+      const mode = String(req.body?.mode || req.query?.mode || 'dry-run').toLowerCase() === 'apply' ? 'apply' : 'dry-run';
+      const triggeredBy = String(req.body?.triggeredBy || req.query?.triggeredBy || 'api').slice(0, 80);
+      const maxRows = Number(req.body?.maxRows || req.query?.maxRows || recoveredActiveSyncMaxRows());
+      const onlyCustomerIds = []
+        .concat(req.body?.onlyCustomerIds || req.body?.onlyCustomerId || req.query?.onlyCustomerIds || req.query?.onlyCustomerId || [])
+        .flatMap(value => String(value || '').split(','))
+        .map(value => value.trim())
+        .filter(Boolean);
+      const onlySubscriptionIds = []
+        .concat(req.body?.onlySubscriptionIds || req.body?.onlySubscriptionId || req.query?.onlySubscriptionIds || req.query?.onlySubscriptionId || [])
+        .flatMap(value => String(value || '').split(','))
+        .map(value => value.trim())
+        .filter(Boolean);
+      const sheets = await getSheetsClient();
+      const result = await syncRecoveredSubsToActive({ sheets, mode, triggeredBy, maxRows, onlyCustomerIds, onlySubscriptionIds });
+      res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error('RECOVERED ACTIVE SYNC ERROR:', err.message);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   return router;
 }
 
@@ -137,4 +210,60 @@ function startNewOrdersAutomation({ initialDelayMs = 30000 } = {}) {
   return automationState;
 }
 
-module.exports = { createSubscriptionsRouter, startNewOrdersAutomation, runNewOrdersAutomationOnce };
+async function runRecoveredActiveSyncAutomationOnce(triggeredBy = 'recovered-active-sync-auto') {
+  if (recoveredActiveSyncState.running) {
+    return { ok: true, skipped: true, reason: 'recovered active sync automation already running' };
+  }
+  recoveredActiveSyncState.running = true;
+  recoveredActiveSyncState.lastRunAtUtc = new Date().toISOString();
+  try {
+    const sheets = await getSheetsClient();
+    const result = await syncRecoveredSubsToActive({
+      sheets,
+      mode: 'apply',
+      triggeredBy,
+      maxRows: recoveredActiveSyncMaxRows()
+    });
+    recoveredActiveSyncState.lastSuccessAtUtc = new Date().toISOString();
+    recoveredActiveSyncState.lastError = '';
+    recoveredActiveSyncState.lastCounts = result.counts || null;
+    console.log('Recovered Subs → Active sync automation completed', JSON.stringify({ counts: recoveredActiveSyncState.lastCounts }));
+    return result;
+  } catch (err) {
+    recoveredActiveSyncState.lastErrorAtUtc = new Date().toISOString();
+    recoveredActiveSyncState.lastError = String(err?.message || err).slice(0, 300);
+    console.error('Recovered Subs → Active sync automation error:', recoveredActiveSyncState.lastError);
+    return { ok: false, error: recoveredActiveSyncState.lastError };
+  } finally {
+    recoveredActiveSyncState.running = false;
+  }
+}
+
+function startRecoveredActiveSyncAutomation({ initialDelayMs = 60000 } = {}) {
+  if (recoveredActiveSyncState.started) return recoveredActiveSyncState;
+  if (!isRecoveredActiveSyncEnabled()) {
+    console.log('Recovered Subs → Active sync automation disabled by RECOVERED_ACTIVE_SYNC_ENABLED=false');
+    return recoveredActiveSyncState;
+  }
+  recoveredActiveSyncState.started = true;
+  const intervalMs = recoveredActiveSyncIntervalMs();
+  const tick = () => runRecoveredActiveSyncAutomationOnce('recovered-active-sync-auto').catch(err => {
+    recoveredActiveSyncState.lastErrorAtUtc = new Date().toISOString();
+    recoveredActiveSyncState.lastError = String(err?.message || err).slice(0, 300);
+    recoveredActiveSyncState.running = false;
+  });
+  recoveredActiveSyncState.initialTimer = setTimeout(tick, Math.max(0, initialDelayMs));
+  recoveredActiveSyncState.timer = setInterval(tick, intervalMs);
+  if (recoveredActiveSyncState.initialTimer.unref) recoveredActiveSyncState.initialTimer.unref();
+  if (recoveredActiveSyncState.timer.unref) recoveredActiveSyncState.timer.unref();
+  console.log('Recovered Subs → Active sync automation started', JSON.stringify({ intervalMs, maxRows: recoveredActiveSyncMaxRows() }));
+  return recoveredActiveSyncState;
+}
+
+module.exports = {
+  createSubscriptionsRouter,
+  startNewOrdersAutomation,
+  runNewOrdersAutomationOnce,
+  startRecoveredActiveSyncAutomation,
+  runRecoveredActiveSyncAutomationOnce
+};
