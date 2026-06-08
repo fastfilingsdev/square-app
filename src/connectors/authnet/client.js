@@ -49,6 +49,26 @@ async function getSubscription(subscriptionId, config = getAuthNetConfig()) {
   }, config);
 }
 
+async function getTransactionDetails(transId, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  return authNetPost({
+    getTransactionDetailsRequest: {
+      merchantAuthentication,
+      transId: String(transId)
+    }
+  }, config);
+}
+
+async function getTransactionListForCustomer(customerProfileId, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  return authNetPost({
+    getTransactionListForCustomerRequest: {
+      merchantAuthentication,
+      customerProfileId: String(customerProfileId)
+    }
+  }, config);
+}
+
 async function getHostedProfilePageToken(customerProfileId, hostedProfileSettings = [], config = getAuthNetConfig()) {
   const merchantAuthentication = getMerchantAuthentication(config);
   const data = await authNetPost({
@@ -165,5 +185,7 @@ module.exports = {
   getHostedPaymentPageToken,
   getHostedProfilePageToken,
   getMerchantAuthentication,
-  getSubscription
+  getSubscription,
+  getTransactionDetails,
+  getTransactionListForCustomer
 };

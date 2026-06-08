@@ -20,6 +20,7 @@ const {
     chooseHoldRow,
     extractProfileIds,
     findMatchingBRow,
+    runBValidationFallback,
     isPaymentProfileUpdatedEvent,
     isReadyBRow,
     parseAmount,
@@ -521,6 +522,91 @@ test('B webhook charge mode refuses duplicate charge when Recovered Subs already
   assert.equal(result.status, 'skipped');
   assert.equal(result.reason, 'recovered-ledger-already-recorded');
   assert.equal(chargeCalled, false);
+  assert.equal(updates.length, 0);
+  assert.equal(appends.length, 0);
+});
+
+test('B fallback audit detects post-click $0.01 validations without sheet writes or charges', async () => {
+  const updates = [];
+  const appends = [];
+  const tableValues = {
+    'Payment Update': [[
+      'Payment Update Type', 'Payment Update Status', 'Stop / Suppressed', 'Subscription ID', 'Customer ID', 'Name', 'Email', 'Payment Update Link'
+    ], [
+      'SUB RECAPTURE B - Payment on Hold', 'Live Link Ready', '', '71669864', 'FL-58', 'Test Customer', 'customer@example.test', 'https://fastfilings-api.onrender.com/payment-update/ticket_1'
+    ]],
+    'Payment on Hold': [['Subscription ID', 'Amount Due'], ['71669864', '20']],
+    'Payment Update Link Tickets': [[
+      'Ticket ID', 'Subscription ID', 'Ticket Status', 'Last Click At'
+    ], [
+      'ticket_1', '71669864', 'Live Link Ready', '2026-06-04T20:00:00.000Z'
+    ]],
+    'AuthNet_Transactions': [['Invoice Number']],
+    'Recovered Subs': [RECOVERED_HEADERS],
+    'Stop_Work_Feed': [['Subscription ID']]
+  };
+  const fakeSheets = {
+    spreadsheets: {
+      values: {
+        get: async ({ range }) => {
+          const match = String(range).match(/^'([^']+)'!/);
+          return { data: { values: tableValues[match ? match[1] : ''] || [] } };
+        },
+        update: async ({ range, requestBody }) => {
+          updates.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        },
+        append: async ({ range, requestBody }) => {
+          appends.push({ range, values: requestBody.values[0] });
+          return { data: {} };
+        }
+      }
+    }
+  };
+
+  const result = await runBValidationFallback({
+    sheets: fakeSheets,
+    spreadsheetId: 'sheet_1',
+    mode: 'audit',
+    lookbackDays: 14,
+    maxRows: 10,
+    maxCharges: 3,
+    date: new Date('2026-06-08T20:00:00Z'),
+    getSubscriptionFn: async () => ({
+      subscription: {
+        status: 'active',
+        amount: '20.00',
+        profile: {
+          customerProfileId: 'cust_abc',
+          paymentProfile: { customerPaymentProfileId: 'pay_xyz' }
+        }
+      }
+    }),
+    getTransactionListForCustomerFn: async () => ({
+      transactions: [{ transId: 'tx_validation', submitTimeUTC: '2026-06-04T20:01:00.000Z' }]
+    }),
+    getTransactionDetailsFn: async () => ({
+      transaction: {
+        transId: 'tx_validation',
+        submitTimeUTC: '2026-06-04T20:01:00.000Z',
+        transactionType: 'authOnlyTransaction',
+        transactionStatus: 'voided',
+        responseCode: '1',
+        authAmount: 0.01,
+        profile: {},
+        payment: { creditCard: {} }
+      }
+    }),
+    chargeCustomerPaymentProfileFn: async () => {
+      throw new Error('charge should not be called in audit mode');
+    }
+  });
+
+  assert.equal(result.mode, 'audit');
+  assert.equal(result.counts.actions, 1);
+  assert.equal(result.counts.charged, 0);
+  assert.equal(result.actions[0].subscriptionId, '71669864');
+  assert.equal(result.actions[0].validation.authAmount, 0.01);
   assert.equal(updates.length, 0);
   assert.equal(appends.length, 0);
 });

@@ -6,7 +6,7 @@ const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 const { createSubscriptionsRouter, startNewOrdersAutomation } = require('./src/features/subscriptions/routes');
-const { createAuthNetWebhookRouter } = require('./src/features/authnetWebhook/routes');
+const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation } = require('./src/features/authnetWebhook/routes');
 
 const app = express();
 app.use(express.json({
@@ -2333,6 +2333,7 @@ app.get('/debug-env', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   startNewOrdersAutomation();
+  startAuthNetBFallbackAutomation();
 });
 
 app.get('/clover-payments', async (req, res) => {

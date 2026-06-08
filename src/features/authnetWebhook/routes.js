@@ -2,13 +2,31 @@ const crypto = require('crypto');
 const express = require('express');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
+  bFallbackAutomationIntervalMs,
+  bFallbackAutomationLookbackDays,
+  bFallbackAutomationMaxCharges,
+  bFallbackAutomationMaxRows,
+  isBFallbackAutomationEnabled,
   isBChargeEnabled,
   isBDetectionEnabled,
-  processBProfileUpdatedWebhook
+  processBProfileUpdatedWebhook,
+  runBValidationFallback
 } = require('./paymentUpdateBRecovery');
 
 const WEBHOOK_LOG_SHEET_NAME = 'AuthNet_Webhook_Log';
 const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v5-auto-charge';
+
+const fallbackAutomationState = {
+  started: false,
+  running: false,
+  timer: null,
+  initialTimer: null,
+  lastRunAtUtc: null,
+  lastSuccessAtUtc: null,
+  lastErrorAtUtc: null,
+  lastError: '',
+  lastCounts: null
+};
 
 const WEBHOOK_LOG_HEADERS = [
   'Received At',
@@ -30,6 +48,15 @@ function getWebhookSpreadsheetId() {
     || process.env.PAYMENT_UPDATE_SPREADSHEET_ID
     || process.env.GOOGLE_SHEETS_SPREADSHEET_ID
     || '';
+}
+
+function hasValidSyncToken(req) {
+  const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
+  if (!expected) return false;
+  const headerToken = String(req.get('x-ff-sync-token') || req.get('x-authnet-sync-token') || '').trim();
+  const auth = String(req.get('authorization') || '').trim();
+  const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+  return headerToken === expected || bearer === expected;
 }
 
 function normalizeHexKey(value) {
@@ -238,8 +265,74 @@ function createAuthNetWebhookRouter(options = {}) {
             ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
             : [WEBHOOK_LOG_SHEET_NAME]),
       authnetMutations: bChargeEnabled ? ['B profile-updated catch-up charge'] : false,
-      customerEmails: false
+      customerEmails: false,
+      bFallbackAutomation: {
+        enabled: isBFallbackAutomationEnabled(),
+        started: fallbackAutomationState.started,
+        running: fallbackAutomationState.running,
+        intervalMs: bFallbackAutomationIntervalMs(),
+        lookbackDays: bFallbackAutomationLookbackDays(),
+        maxRows: bFallbackAutomationMaxRows(),
+        maxCharges: bFallbackAutomationMaxCharges(),
+        lastRunAtUtc: fallbackAutomationState.lastRunAtUtc,
+        lastSuccessAtUtc: fallbackAutomationState.lastSuccessAtUtc,
+        lastErrorAtUtc: fallbackAutomationState.lastErrorAtUtc,
+        lastError: fallbackAutomationState.lastError,
+        lastCounts: fallbackAutomationState.lastCounts
+      }
     });
+  });
+
+  router.get('/b-catchup/fallback/health', (req, res) => {
+    res.json({
+      ok: true,
+      route: '/authnet/b-catchup/fallback',
+      authRequired: true,
+      authConfigured: Boolean(process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN),
+      spreadsheetConfigured: Boolean(getWebhookSpreadsheetId()),
+      authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
+      bDetectionEnabled: isBDetectionEnabled(),
+      bChargeEnabled: isBChargeEnabled(),
+      automation: {
+        enabled: isBFallbackAutomationEnabled(),
+        started: fallbackAutomationState.started,
+        running: fallbackAutomationState.running,
+        intervalMs: bFallbackAutomationIntervalMs(),
+        lookbackDays: bFallbackAutomationLookbackDays(),
+        maxRows: bFallbackAutomationMaxRows(),
+        maxCharges: bFallbackAutomationMaxCharges(),
+        lastRunAtUtc: fallbackAutomationState.lastRunAtUtc,
+        lastSuccessAtUtc: fallbackAutomationState.lastSuccessAtUtc,
+        lastErrorAtUtc: fallbackAutomationState.lastErrorAtUtc,
+        lastError: fallbackAutomationState.lastError,
+        lastCounts: fallbackAutomationState.lastCounts
+      },
+      safety: 'SUB B / Payment on Hold missed-webhook fallback only. Detects post-click $0.01 auth-only validations, then reuses the existing B catch-up flow in apply mode. No customer emails, no ARB create/cancel/replacement, no refunds, and no raw card/bank/profile data returned.'
+    });
+  });
+
+  router.post('/b-catchup/fallback', async (req, res) => {
+    if (!hasValidSyncToken(req)) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized Auth.Net B fallback request' });
+    }
+    const spreadsheetId = getWebhookSpreadsheetId();
+    if (!spreadsheetId) {
+      return res.status(503).json({ ok: false, error: 'spreadsheet_not_configured' });
+    }
+    try {
+      const mode = String(req.body?.mode || req.query?.mode || 'audit').toLowerCase() === 'apply' ? 'apply' : 'audit';
+      const triggeredBy = String(req.body?.triggeredBy || req.query?.triggeredBy || 'api').slice(0, 80);
+      const lookbackDays = Number(req.body?.lookbackDays || req.query?.lookbackDays || bFallbackAutomationLookbackDays());
+      const maxRows = Number(req.body?.maxRows || req.query?.maxRows || bFallbackAutomationMaxRows());
+      const maxCharges = Number(req.body?.maxCharges || req.query?.maxCharges || bFallbackAutomationMaxCharges());
+      const sheets = await getSheets();
+      const result = await runBValidationFallback({ sheets, spreadsheetId, mode, triggeredBy, lookbackDays, maxRows, maxCharges });
+      res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error('AUTHNET B FALLBACK ERROR:', err.message);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
   router.post('/webhook', async (req, res) => {
@@ -291,7 +384,72 @@ function createAuthNetWebhookRouter(options = {}) {
   return router;
 }
 
+async function runBFallbackAutomationOnce(triggeredBy = 'authnet-b-validation-fallback-auto') {
+  if (fallbackAutomationState.running) {
+    return { ok: true, skipped: true, reason: 'B fallback automation already running' };
+  }
+  const spreadsheetId = getWebhookSpreadsheetId();
+  if (!spreadsheetId) {
+    return { ok: false, error: 'spreadsheet_not_configured' };
+  }
+  fallbackAutomationState.running = true;
+  fallbackAutomationState.lastRunAtUtc = new Date().toISOString();
+  try {
+    const sheets = await getSheetsClient();
+    const result = await runBValidationFallback({
+      sheets,
+      spreadsheetId,
+      mode: 'apply',
+      triggeredBy,
+      lookbackDays: bFallbackAutomationLookbackDays(),
+      maxRows: bFallbackAutomationMaxRows(),
+      maxCharges: bFallbackAutomationMaxCharges()
+    });
+    fallbackAutomationState.lastSuccessAtUtc = new Date().toISOString();
+    fallbackAutomationState.lastError = '';
+    fallbackAutomationState.lastCounts = result.counts || null;
+    console.log('Auth.Net B fallback automation completed', JSON.stringify({ counts: fallbackAutomationState.lastCounts }));
+    return result;
+  } catch (err) {
+    fallbackAutomationState.lastErrorAtUtc = new Date().toISOString();
+    fallbackAutomationState.lastError = String(err?.message || err).slice(0, 300);
+    console.error('Auth.Net B fallback automation error:', fallbackAutomationState.lastError);
+    return { ok: false, error: fallbackAutomationState.lastError };
+  } finally {
+    fallbackAutomationState.running = false;
+  }
+}
+
+function startAuthNetBFallbackAutomation({ initialDelayMs = 45000 } = {}) {
+  if (fallbackAutomationState.started) return fallbackAutomationState;
+  if (!isBFallbackAutomationEnabled()) {
+    console.log('Auth.Net B fallback automation disabled by AUTHNET_B_FALLBACK_AUTOMATION_ENABLED=false');
+    return fallbackAutomationState;
+  }
+  fallbackAutomationState.started = true;
+  const intervalMs = bFallbackAutomationIntervalMs();
+  const tick = () => runBFallbackAutomationOnce('authnet-b-validation-fallback-auto').catch(err => {
+    fallbackAutomationState.lastErrorAtUtc = new Date().toISOString();
+    fallbackAutomationState.lastError = String(err?.message || err).slice(0, 300);
+    fallbackAutomationState.running = false;
+  });
+  fallbackAutomationState.initialTimer = setTimeout(tick, Math.max(0, initialDelayMs));
+  fallbackAutomationState.timer = setInterval(tick, intervalMs);
+  if (fallbackAutomationState.initialTimer.unref) fallbackAutomationState.initialTimer.unref();
+  if (fallbackAutomationState.timer.unref) fallbackAutomationState.timer.unref();
+  console.log('Auth.Net B fallback automation started', JSON.stringify({
+    intervalMs,
+    lookbackDays: bFallbackAutomationLookbackDays(),
+    maxRows: bFallbackAutomationMaxRows(),
+    maxCharges: bFallbackAutomationMaxCharges(),
+    bChargeEnabled: isBChargeEnabled()
+  }));
+  return fallbackAutomationState;
+}
+
 module.exports = {
+  startAuthNetBFallbackAutomation,
+  runBFallbackAutomationOnce,
   createAuthNetWebhookRouter,
   __authNetWebhookTestHooks: {
     WEBHOOK_LOG_HEADERS,

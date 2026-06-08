@@ -1,6 +1,8 @@
 const {
   chargeCustomerPaymentProfile,
-  getSubscription
+  getSubscription,
+  getTransactionDetails,
+  getTransactionListForCustomer
 } = require('../../connectors/authnet/client');
 
 const PAYMENT_UPDATE_TAB = 'Payment Update';
@@ -21,6 +23,9 @@ const READY_STATUSES = new Set([
   'card appears updated payment still pending verification'
 ]);
 const FINAL_STOP_VALUES = new Set(['resolved', 'completed']);
+const DEFAULT_FALLBACK_LOOKBACK_DAYS = 14;
+const DEFAULT_FALLBACK_MAX_ROWS = 75;
+const DEFAULT_FALLBACK_MAX_CHARGES = 3;
 const RECOVERED_HEADERS = [
   'Recovered At', 'Recovery Type', 'Recovery Status', 'Active Sync Status', 'Customer ID', 'Name', 'Email', 'Alt Email',
   'Subscription ID', 'Current Active Subscription ID', 'Old Subscription ID', 'Amount', 'Recovered Payment Transaction ID',
@@ -55,6 +60,37 @@ function isBChargeEnabled() {
   return envFlag('AUTHNET_WEBHOOK_B_CHARGE_ENABLED', true);
 }
 
+function isBFallbackAutomationEnabled() {
+  // This is the watchdog/reconciler for missed Auth.Net profile-update webhooks.
+  // It only targets SUB RECAPTURE B / Payment on Hold rows and still respects
+  // AUTHNET_WEBHOOK_B_CHARGE_ENABLED for actual money movement.
+  return envFlag('AUTHNET_B_FALLBACK_AUTOMATION_ENABLED', true);
+}
+
+function bFallbackAutomationIntervalMs() {
+  const minutes = Number(process.env.AUTHNET_B_FALLBACK_AUTOMATION_INTERVAL_MINUTES || 60);
+  const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 60;
+  return Math.max(10, safeMinutes) * 60 * 1000;
+}
+
+function bFallbackAutomationLookbackDays() {
+  const days = Number(process.env.AUTHNET_B_FALLBACK_LOOKBACK_DAYS || DEFAULT_FALLBACK_LOOKBACK_DAYS);
+  if (!Number.isFinite(days) || days <= 0) return DEFAULT_FALLBACK_LOOKBACK_DAYS;
+  return Math.max(1, Math.min(days, 31));
+}
+
+function bFallbackAutomationMaxRows() {
+  const max = Number(process.env.AUTHNET_B_FALLBACK_MAX_ROWS || DEFAULT_FALLBACK_MAX_ROWS);
+  if (!Number.isFinite(max) || max <= 0) return DEFAULT_FALLBACK_MAX_ROWS;
+  return Math.max(1, Math.min(max, 250));
+}
+
+function bFallbackAutomationMaxCharges() {
+  const max = Number(process.env.AUTHNET_B_FALLBACK_MAX_CHARGES || DEFAULT_FALLBACK_MAX_CHARGES);
+  if (!Number.isFinite(max) || max <= 0) return DEFAULT_FALLBACK_MAX_CHARGES;
+  return Math.max(1, Math.min(max, 10));
+}
+
 function isPaymentProfileUpdatedEvent(eventType) {
   const normalized = normalize(eventType);
   return normalized.includes('paymentprofile') && normalized.includes('updated');
@@ -67,6 +103,68 @@ function firstString(...values) {
     if (text) return text;
   }
   return '';
+}
+
+function parseDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function daysAgoDate(days, baseDate = new Date()) {
+  const safeDays = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : DEFAULT_FALLBACK_LOOKBACK_DAYS;
+  return new Date(baseDate.getTime() - safeDays * 24 * 60 * 60 * 1000);
+}
+
+function isInternalOrTestBRow(puRow, ticket) {
+  const customerId = getField(puRow, 'Customer ID');
+  const ticketId = ticket ? getField(ticket, 'Ticket ID') : ticketIdFromLink(getField(puRow, 'Payment Update Link'));
+  return normalize(customerId).startsWith('test') || normalize(ticketId).startsWith('pu test');
+}
+
+function transactionItemsFromList(response) {
+  const items = response?.transactions || response?.transaction || response?.transactionList || [];
+  if (Array.isArray(items)) return items;
+  if (items && typeof items === 'object') return [items];
+  return [];
+}
+
+function transactionIdFromItem(item) {
+  return firstString(item?.transId, item?.transactionId, item?.id);
+}
+
+function transactionSubmitDate(item) {
+  return parseDate(firstString(item?.submitTimeUTC, item?.submitTimeUtc, item?.submitTimeLocal));
+}
+
+function isAuthOnlyValidationDetail(transaction) {
+  if (!transaction || typeof transaction !== 'object') return false;
+  const txType = String(transaction.transactionType || '').trim();
+  const txStatus = normalize(transaction.transactionStatus);
+  const responseCode = String(transaction.responseCode || '').trim();
+  const amount = Number(firstString(transaction.authAmount, transaction.authorizeAmount, transaction.settleAmount, transaction.amount) || 0);
+  return txType === 'authOnlyTransaction'
+    && txStatus === 'voided'
+    && responseCode === '1'
+    && Number.isFinite(amount)
+    && Math.abs(amount - 0.01) < 0.0001
+    && Boolean(transaction.profile)
+    && Boolean(transaction.payment);
+}
+
+function safeValidationSummary(transaction) {
+  return {
+    submitTimeUTC: firstString(transaction?.submitTimeUTC, transaction?.submitTimeUtc, transaction?.submitTimeLocal),
+    transactionIdPresent: Boolean(transaction?.transId),
+    transactionStatus: firstString(transaction?.transactionStatus),
+    transactionType: firstString(transaction?.transactionType),
+    responseCode: firstString(transaction?.responseCode),
+    authAmount: 0.01,
+    profileObjectPresent: Boolean(transaction?.profile),
+    paymentObjectKind: transaction?.payment?.creditCard ? 'creditCard' : (transaction?.payment?.bankAccount ? 'bankAccount' : '')
+  };
 }
 
 function nestedValue(obj, path) {
@@ -726,11 +824,192 @@ async function processBProfileUpdatedWebhook({
   };
 }
 
+async function latestPostClickValidation({
+  customerProfileId,
+  lastClickAt,
+  lookbackStart,
+  getTransactionListForCustomerFn = getTransactionListForCustomer,
+  getTransactionDetailsFn = getTransactionDetails
+}) {
+  if (!customerProfileId || !lastClickAt) return null;
+  const txList = await getTransactionListForCustomerFn(customerProfileId);
+  const candidates = transactionItemsFromList(txList)
+    .map(item => ({ item, transId: transactionIdFromItem(item), submitAt: transactionSubmitDate(item) }))
+    .filter(item => item.transId)
+    .filter(item => !item.submitAt || item.submitAt >= lookbackStart)
+    .sort((a, b) => (b.submitAt?.getTime() || 0) - (a.submitAt?.getTime() || 0));
+
+  for (const candidate of candidates.slice(0, 20)) {
+    const detailResponse = await getTransactionDetailsFn(candidate.transId);
+    const transaction = detailResponse?.transaction || {};
+    const detailSubmitAt = parseDate(firstString(transaction.submitTimeUTC, transaction.submitTimeUtc, transaction.submitTimeLocal)) || candidate.submitAt;
+    if (!detailSubmitAt || detailSubmitAt < lastClickAt || detailSubmitAt < lookbackStart) continue;
+    if (!isAuthOnlyValidationDetail(transaction)) continue;
+    return {
+      submitAt: detailSubmitAt.toISOString(),
+      transactionIdPresent: true,
+      safeSummary: safeValidationSummary(transaction)
+    };
+  }
+  return null;
+}
+
+async function runBValidationFallback({
+  sheets,
+  spreadsheetId,
+  mode = 'audit',
+  triggeredBy = 'authnet-b-validation-fallback',
+  lookbackDays = bFallbackAutomationLookbackDays(),
+  maxRows = bFallbackAutomationMaxRows(),
+  maxCharges = bFallbackAutomationMaxCharges(),
+  date = new Date(),
+  getSubscriptionFn = getSubscription,
+  getTransactionListForCustomerFn = getTransactionListForCustomer,
+  getTransactionDetailsFn = getTransactionDetails,
+  chargeCustomerPaymentProfileFn = chargeCustomerPaymentProfile
+}) {
+  const apply = String(mode || '').toLowerCase() === 'apply';
+  const chargeEnabled = apply && isBChargeEnabled();
+  const startedAtUtc = nowIso();
+  const lookbackStart = daysAgoDate(lookbackDays, date);
+  const tables = await loadBRecoveryTables(sheets, spreadsheetId);
+  const readyRows = tables.paymentUpdate.rows.filter(isReadyBRow).slice(0, Math.max(1, Number(maxRows) || DEFAULT_FALLBACK_MAX_ROWS));
+  const actions = [];
+  const skipped = [];
+  const errors = [];
+  let chargedCount = 0;
+
+  for (const puRow of readyRows) {
+    const subscriptionId = getField(puRow, 'Subscription ID');
+    const ticket = findTicket(tables.tickets.rows, puRow);
+    const holdRow = chooseHoldRow(tables.paymentHold.rows, subscriptionId);
+    const lastClickAt = parseDate(ticket ? getField(ticket, 'Last Click At') : '');
+    const base = {
+      customerId: getField(puRow, 'Customer ID'),
+      customerName: getField(puRow, 'Name'),
+      subscriptionId,
+      paymentUpdateRow: puRow._rowNumber,
+      paymentHoldRow: holdRow ? holdRow._rowNumber : null,
+      ticketRow: ticket ? ticket._rowNumber : null,
+      ticketId: ticket ? getField(ticket, 'Ticket ID') : ticketIdFromLink(getField(puRow, 'Payment Update Link')),
+      paymentUpdateStatus: getField(puRow, 'Payment Update Status'),
+      ticketStatus: ticket ? getField(ticket, 'Ticket Status') : '',
+      lastClickAt: lastClickAt ? lastClickAt.toISOString() : '',
+      amountDue: holdRow ? parseAmount(getField(holdRow, 'Amount Due')) : ''
+    };
+
+    if (!ticket || !lastClickAt) {
+      skipped.push({ ...base, reason: 'no-ticket-click' });
+      continue;
+    }
+    if (isInternalOrTestBRow(puRow, ticket)) {
+      skipped.push({ ...base, reason: 'test-or-internal-row' });
+      continue;
+    }
+    if (!holdRow || !base.amountDue) {
+      skipped.push({ ...base, reason: 'missing-hold-row-or-amount' });
+      continue;
+    }
+    if (apply && chargedCount >= Number(maxCharges)) {
+      skipped.push({ ...base, reason: `max-charge-cap-reached-${maxCharges}` });
+      continue;
+    }
+
+    try {
+      const subscriptionData = await getSubscriptionFn(subscriptionId);
+      const ids = subscriptionProfileIds(subscriptionData);
+      if (normalize(ids.subscriptionStatus) !== 'active') {
+        skipped.push({ ...base, reason: 'subscription-not-active', authNetStatus: ids.subscriptionStatus });
+        continue;
+      }
+      if (!ids.customerProfileId || !ids.customerPaymentProfileId) {
+        skipped.push({ ...base, reason: 'missing-subscription-profile-ids' });
+        continue;
+      }
+      const validation = await latestPostClickValidation({
+        customerProfileId: ids.customerProfileId,
+        lastClickAt,
+        lookbackStart,
+        getTransactionListForCustomerFn,
+        getTransactionDetailsFn
+      });
+      if (!validation) {
+        skipped.push({ ...base, reason: 'no-post-click-validation-found' });
+        continue;
+      }
+
+      const action = {
+        ...base,
+        mode: apply ? 'apply' : 'audit',
+        authNetStatus: ids.subscriptionStatus,
+        validation: validation.safeSummary,
+        validationSubmitAt: validation.submitAt,
+        triggeredBy,
+        recommendedAction: apply ? 'fallback-will-run-existing-b-catchup-flow' : 'ready-for-b-catchup-fallback-if-apply-enabled'
+      };
+
+      if (apply) {
+        const recovery = await processBProfileUpdatedWebhook({
+          body: {
+            eventType: 'net.authorize.customer.paymentProfile.updated',
+            webhookId: 'ff-b-validation-fallback',
+            payload: {
+              customerProfileId: ids.customerProfileId,
+              customerPaymentProfileId: ids.customerPaymentProfileId
+            }
+          },
+          sheets,
+          spreadsheetId,
+          detectEnabled: true,
+          chargeEnabled,
+          getSubscriptionFn,
+          chargeCustomerPaymentProfileFn,
+          date
+        });
+        action.recovery = recovery;
+        if (recovery?.status === 'charged') chargedCount += 1;
+      }
+      actions.push(action);
+    } catch (err) {
+      errors.push({ ...base, reason: String(err?.message || err).slice(0, 300) });
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    mode: apply ? 'apply' : 'audit',
+    triggeredBy,
+    startedAtUtc,
+    finishedAtUtc: nowIso(),
+    lookbackDays,
+    maxRows,
+    maxCharges,
+    chargeEnabled,
+    scannedReadyBRows: readyRows.length,
+    counts: {
+      actions: actions.length,
+      charged: chargedCount,
+      skipped: skipped.length,
+      errors: errors.length
+    },
+    actions,
+    skipped,
+    errors,
+    safety: 'SUB B / Payment on Hold fallback only. Detects post-click $0.01 auth-only validations that missed webhook processing, then reuses the existing B catch-up flow in apply mode. No customer emails, no ARB create/cancel/replacement, no refunds, and no raw card/bank/profile data returned.'
+  };
+}
+
 module.exports = {
   B_TYPE,
+  bFallbackAutomationIntervalMs,
+  bFallbackAutomationLookbackDays,
+  bFallbackAutomationMaxCharges,
+  bFallbackAutomationMaxRows,
+  isBFallbackAutomationEnabled,
   isBChargeEnabled,
   isBDetectionEnabled,
   processBProfileUpdatedWebhook,
+  runBValidationFallback,
   __bRecoveryTestHooks: {
     bInvoiceNumber,
     chargeSummary,
@@ -740,9 +1019,12 @@ module.exports = {
     PAYMENT_UPDATE_PENDING_STATUS,
     RECOVERED_HEADERS,
     TICKET_PENDING_STATUS,
+    isAuthOnlyValidationDetail,
     isPaymentProfileUpdatedEvent,
     isReadyBRow,
+    latestPostClickValidation,
     parseAmount,
+    runBValidationFallback,
     subscriptionProfileIds
   }
 };
