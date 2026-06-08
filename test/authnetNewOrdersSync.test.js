@@ -164,3 +164,49 @@ test('explicit transaction id that is not found remains review', () => {
   assert.equal(match.tx, null);
   assert.match(match.reason, /not found/i);
 });
+
+test('duplicate New Orders rows are resolved without another ARB attempt', () => {
+  const headers = orderRows()[0];
+  const duplicateRows = [headers, [
+    'Jun 8, 2026 15:04:42', 'Courtney Henig', 'courtney@example.test', '', '20', '1468775516', '121662468989', 'TRUE',
+    'Subscription created', 'Active Subscriptions / Onboarding', '', '', '', 'ARB subscription 73319055 created starting 2026-07-08.'
+  ], [
+    '2026-06-08T19:04:43.057Z', 'Courtney Henig', 'courtney@example.test', '', '20', '1468775516', '121662468989', '',
+    'Review — ARB failed', 'Review / Payment Issue', '', 'ARB failed: E00012 You have submitted a duplicate of Subscription 73319055. A duplicate subscription will not be created.', '',
+    'ARB failed; not onboarded: E00012 You have submitted a duplicate of Subscription 73319055. A duplicate subscription will not be created.'
+  ]];
+  const conversionRows = [[
+    'Source New Order Row', 'Order / Invoice #', 'Auth.Net Transaction ID', 'Email', 'Customer ID', 'Amount',
+    'Desired Monthly Amount', 'First Billing Date', 'Profile Creation Status', 'ARB Creation Status',
+    'New Subscription ID', 'Approval Evidence', 'Notes', 'Name', 'Routed At', 'Last Updated At'
+  ], [
+    '2', '1468775516', '121662468989', 'courtney@example.test', '', '20', '20', '2026-07-08',
+    'Created from original transaction', 'Created', '73319055', '', 'ARB created starting 2026-07-08.', 'Courtney Henig', '', ''
+  ], [
+    '3', '1468775516', '121662468989', 'courtney@example.test', '', '20', '20', '2026-07-08',
+    'Created from original transaction', 'Failed — E00012 You have submitted a duplicate of Subscription 73319055.', '', '', 'ARB failed.', 'Courtney Henig', '', ''
+  ]];
+
+  const plan = buildPlan({
+    newOrderRows: duplicateRows,
+    conversionRows,
+    activeRows: [['Subscription ID'], ['73319055']],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-08T22:10:00Z', records: [approvedTx({
+      transId: '121662468989',
+      order: { invoiceNumber: '1468775516' },
+      submitTimeUTC: '2026-06-08T19:04:43.057Z',
+      customer: { email: 'courtney@example.test' }
+    })], errors: [] },
+    now: '2026-06-08T22:10:00Z'
+  });
+
+  assert.equal(plan.conversionUpserts.length, 0);
+  assert.equal(plan.ready.length, 0);
+  assert.equal(plan.rowUpdates.length, 1);
+  assert.equal(plan.rowUpdates[0].rowNumber, 3);
+  assert.equal(plan.rowUpdates[0].fields['Payment Status'], 'Duplicate — already routed');
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /Duplicate of New Orders row 2/);
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /73319055/);
+  assert.equal(plan.skipped.some(item => item.reason === 'Duplicate of New Orders row 2'), true);
+});

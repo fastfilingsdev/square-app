@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { getSheetsClient } = require('../../core/googleSheets');
-const { authNetPost, getMerchantAuthentication } = require('../../connectors/authnet/client');
+const { authNetPost, getMerchantAuthentication, getSubscription } = require('../../connectors/authnet/client');
 
 const DEFAULT_FF_BILLING_SPREADSHEET_ID = '1DANHiunfffxvN7PWBxxO0WIzPWVGeOlaWMEcH-eJxBg';
 
@@ -240,7 +240,10 @@ function parseDateMs(value) {
 }
 
 function dateOnlyUtc(value) {
-  const ms = parseDateMs(value);
+  const text = normalizeString(value);
+  const dateOnly = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (dateOnly) return dateOnly[1];
+  const ms = parseDateMs(text);
   if (!ms) return '';
   return new Date(ms).toISOString().slice(0, 10);
 }
@@ -257,7 +260,42 @@ function appendNote(existing, note) {
   const prior = normalizeString(existing);
   const text = normalizeString(note);
   if (!text) return prior;
+  if (prior.split('\n').map(line => line.trim()).includes(text)) return prior;
   return prior ? `${prior}\n${text}` : text;
+}
+
+function orderIdentityKey(row, map) {
+  const txId = getCell(row, map, 'Auth.Net Transaction ID');
+  if (txId) return `tx:${txId}`;
+  const invoice = getCell(row, map, 'Order / Invoice #');
+  const email = normalizeEmail(getCell(row, map, 'Email'));
+  const amount = parseAmount(getCell(row, map, 'Amount'));
+  if (invoice && email && amount) return `invoice:${invoice.toLowerCase()}:email:${email}:amount:${amount}`;
+  return '';
+}
+
+function conversionIdentityKey(item) {
+  const txId = getCell(item.row, item.map, 'Auth.Net Transaction ID');
+  if (txId) return `tx:${txId}`;
+  const invoice = getCell(item.row, item.map, 'Order / Invoice #');
+  const email = normalizeEmail(getCell(item.row, item.map, 'Email'));
+  const amount = parseAmount(getCell(item.row, item.map, 'Amount'));
+  if (invoice && email && amount) return `invoice:${invoice.toLowerCase()}:email:${email}:amount:${amount}`;
+  return '';
+}
+
+function conversionIsCreated(item) {
+  if (!item) return false;
+  const subId = getCell(item.row, item.map, 'New Subscription ID');
+  const status = getCell(item.row, item.map, 'ARB Creation Status');
+  return Boolean(subId && /created|already/i.test(status || 'created'));
+}
+
+function preferConversionCandidate(current, candidate) {
+  if (!current) return candidate;
+  if (conversionIsCreated(candidate) && !conversionIsCreated(current)) return candidate;
+  if (conversionIsCreated(candidate) === conversionIsCreated(current) && candidate.rowNumber < current.rowNumber) return candidate;
+  return current;
 }
 
 async function authNetPostWithAuth(payload) {
@@ -592,13 +630,16 @@ function indexConversions(conversionRows) {
   const table = tableFromValues(conversionRows);
   const byTransactionId = new Map();
   const bySourceRow = new Map();
+  const byIdentity = new Map();
   table.rows.forEach(item => {
     const txId = getCell(item.row, item.map, 'Auth.Net Transaction ID');
     const sourceRow = conversionSourceRow(item);
-    if (txId) byTransactionId.set(txId, item);
-    if (sourceRow) bySourceRow.set(String(sourceRow), item);
+    const identity = conversionIdentityKey(item);
+    if (txId) byTransactionId.set(txId, preferConversionCandidate(byTransactionId.get(txId), item));
+    if (sourceRow) bySourceRow.set(String(sourceRow), preferConversionCandidate(bySourceRow.get(String(sourceRow)), item));
+    if (identity) byIdentity.set(identity, preferConversionCandidate(byIdentity.get(identity), item));
   });
-  return { ...table, byTransactionId, bySourceRow };
+  return { ...table, byTransactionId, bySourceRow, byIdentity };
 }
 
 function indexIds(rows, headerName) {
@@ -629,6 +670,53 @@ function indexOnboarding(onboardingRows) {
     if (match) subIds.add(match[1]);
   });
   return { keys, subIds };
+}
+
+function createdSubscriptionForOrder(order, conversionIndex) {
+  const txId = getCell(order.row, order.map, 'Auth.Net Transaction ID');
+  const identity = orderIdentityKey(order.row, order.map);
+  const sourceRow = String(order.rowNumber);
+  const candidates = [
+    txId ? conversionIndex.byTransactionId.get(txId) : null,
+    identity ? conversionIndex.byIdentity.get(identity) : null,
+    conversionIndex.bySourceRow.get(sourceRow)
+  ].filter(Boolean);
+  const created = candidates.find(conversionIsCreated);
+  return created ? getCell(created.row, created.map, 'New Subscription ID') : '';
+}
+
+function indexSuccessfulNewOrders(newOrders, conversionIndex) {
+  const out = new Map();
+  newOrders.rows.forEach(order => {
+    const key = orderIdentityKey(order.row, order.map);
+    if (!key) return;
+    const subCreated = isTruthy(getCell(order.row, order.map, 'Sub Created'));
+    const paymentStatus = getCell(order.row, order.map, 'Payment Status');
+    if (!subCreated && !/^Subscription created$/i.test(paymentStatus)) return;
+    if (!out.has(key)) {
+      out.set(key, {
+        rowNumber: order.rowNumber,
+        subscriptionId: createdSubscriptionForOrder(order, conversionIndex)
+      });
+    }
+  });
+  return out;
+}
+
+function duplicateOrderUpdate(order, duplicate, auth, now) {
+  const subscriptionText = duplicate.subscriptionId ? ` / subscription ${duplicate.subscriptionId}` : '';
+  const review = `Duplicate of New Orders row ${duplicate.rowNumber}${subscriptionText}; no ARB attempted.`;
+  const note = `Duplicate New Orders row resolved: transaction already routed by row ${duplicate.rowNumber}${subscriptionText}; no ARB attempted.`;
+  return {
+    rowNumber: order.rowNumber,
+    fields: {
+      'Payment Status': 'Duplicate — already routed',
+      'Route Target': 'Duplicate / No Action',
+      'Review Status': review,
+      'Last AuthNet Check At': auth.pulledAtUtc || now,
+      'Connector Notes': appendNote(getCell(order.row, order.map, 'Connector Notes'), note)
+    }
+  };
 }
 
 function valuesContainToken(values, token) {
@@ -835,9 +923,61 @@ async function createArbSubscriptionForOrder({ order, tx, profileIds, firstBilli
   return { subscriptionId, messages: data.messages?.message || [] };
 }
 
+function extractDuplicateSubscriptionId(message) {
+  const match = String(message || '').match(/duplicate of Subscription\s+(\d+)/i);
+  return match ? match[1] : '';
+}
+
+function authNetSubscriptionMatchesOrder(subscription, item) {
+  if (!subscription) return false;
+  const amount = subscription.amount;
+  const startDate = dateOnlyUtc(subscription.paymentSchedule?.startDate || subscription.paymentSchedule?.startDateUTC || '');
+  const status = normalizeString(subscription.status).toLowerCase();
+  const expectedAmount = transactionAmount(item.tx) || parseAmount(getCell(item.order.row, item.order.map, 'Amount'));
+  return Boolean(
+    ['active', 'suspended'].includes(status)
+    && amountEqual(amount, expectedAmount)
+    && startDate === item.firstBillingDate
+  );
+}
+
+async function resolveDuplicateArbSubscription(reason, item) {
+  const subscriptionId = extractDuplicateSubscriptionId(reason);
+  if (!subscriptionId) return null;
+  const response = await getSubscription(subscriptionId);
+  const subscription = response.subscription || {};
+  if (!authNetSubscriptionMatchesOrder(subscription, item)) return null;
+  return { subscriptionId };
+}
+
+function markSubscriptionCreatedOnPlan({ plan, item, subscriptionId, firstBillingDate, rowNote, conversionNote }) {
+  item.fields['ARB Creation Status'] = 'Created';
+  item.fields['New Subscription ID'] = subscriptionId;
+  item.fields.Notes = appendNote(item.fields.Notes, conversionNote || `ARB created starting ${firstBillingDate}; original charge kept as first charge evidence.`);
+  const rowUpdate = plan.rowUpdates.find(update => update.rowNumber === item.order.rowNumber);
+  if (rowUpdate) {
+    rowUpdate.fields['Sub Created'] = 'TRUE';
+    rowUpdate.fields['Payment Status'] = 'Subscription created';
+    rowUpdate.fields['Route Target'] = 'Active Subscriptions / Onboarding';
+    rowUpdate.fields['Review Status'] = '';
+    rowUpdate.fields['Connector Notes'] = appendNote(rowUpdate.fields['Connector Notes'], rowNote || `ARB subscription ${subscriptionId} created starting ${firstBillingDate}.`);
+  }
+  if (!plan.activeIds.has(subscriptionId)) {
+    plan.activeInserts.push({ row: buildActiveRow({ order: item.order, tx: item.tx, subscriptionId }), subscriptionId });
+    plan.activeIds.add(subscriptionId);
+  }
+  const onboardingKey = `${normalizeEmail(getCell(item.order.row, item.order.map, 'Email') || transactionEmail(item.tx))}|${getCell(item.order.row, item.order.map, 'Time')}`;
+  if (!plan.onboarding.subIds.has(subscriptionId) && !plan.onboarding.keys.has(onboardingKey)) {
+    plan.onboardingInserts.push({ row: buildOnboardingRow({ order: item.order, tx: item.tx, subscriptionId }), subscriptionId });
+    plan.onboarding.subIds.add(subscriptionId);
+    plan.onboarding.keys.add(onboardingKey);
+  }
+}
+
 function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, auth, now = nowIso() }) {
   const newOrders = tableFromValues(newOrderRows);
   const conversionIndex = indexConversions(conversionRows);
+  const successfulOrderIndex = indexSuccessfulNewOrders(newOrders, conversionIndex);
   const activeIds = indexIds(activeRows, 'Subscription ID');
   const onboarding = indexOnboarding(onboardingRows || []);
 
@@ -855,11 +995,23 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
     const email = getCell(row, m, 'Email');
     const amount = getCell(row, m, 'Amount');
     const currentSubCreated = getCell(row, m, 'Sub Created');
+    const paymentStatus = getCell(row, m, 'Payment Status');
     const existingTxId = getCell(row, m, 'Auth.Net Transaction ID');
     const existingInvoice = getCell(row, m, 'Order / Invoice #');
+    const identityKey = orderIdentityKey(row, m);
 
     if (isTruthy(currentSubCreated)) {
       skipped.push({ rowNumber: order.rowNumber, reason: 'Sub Created already checked' });
+      return;
+    }
+    if (/^Duplicate\s+—\s+already routed/i.test(paymentStatus)) {
+      skipped.push({ rowNumber: order.rowNumber, reason: 'Duplicate row already resolved' });
+      return;
+    }
+    const duplicate = identityKey ? successfulOrderIndex.get(identityKey) : null;
+    if (duplicate && duplicate.rowNumber !== order.rowNumber) {
+      rowUpdates.push(duplicateOrderUpdate(order, duplicate, auth, now));
+      skipped.push({ rowNumber: order.rowNumber, reason: `Duplicate of New Orders row ${duplicate.rowNumber}`, subscriptionId: duplicate.subscriptionId || '' });
       return;
     }
     if (!email && !amount && !existingTxId && !existingInvoice) {
@@ -961,8 +1113,15 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) {
 
   for (const item of plan.conversionUpserts) {
     if (item.newSubscriptionId) {
+      markSubscriptionCreatedOnPlan({
+        plan,
+        item,
+        subscriptionId: item.newSubscriptionId,
+        firstBillingDate: item.firstBillingDate,
+        rowNote: `ARB subscription ${item.newSubscriptionId} already recorded; row marked created without another Auth.Net create attempt.`,
+        conversionNote: `ARB subscription ${item.newSubscriptionId} already recorded; no duplicate Auth.Net create attempted.`
+      });
       item.fields['ARB Creation Status'] = 'Already created';
-      item.fields['New Subscription ID'] = item.newSubscriptionId;
       results.push({ rowNumber: item.order.rowNumber, status: 'skipped-existing-subscription', subscriptionId: item.newSubscriptionId });
       continue;
     }
@@ -975,30 +1134,28 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) {
         profileIds,
         firstBillingDate: item.firstBillingDate
       });
-      item.fields['ARB Creation Status'] = 'Created';
-      item.fields['New Subscription ID'] = arb.subscriptionId;
-      item.fields.Notes = appendNote(item.fields.Notes, `ARB created starting ${item.firstBillingDate}; original charge kept as first charge evidence.`);
-      const rowUpdate = plan.rowUpdates.find(update => update.rowNumber === item.order.rowNumber);
-      if (rowUpdate) {
-        rowUpdate.fields['Sub Created'] = 'TRUE';
-        rowUpdate.fields['Payment Status'] = 'Subscription created';
-        rowUpdate.fields['Route Target'] = 'Active Subscriptions / Onboarding';
-        rowUpdate.fields['Review Status'] = '';
-        rowUpdate.fields['Connector Notes'] = appendNote(rowUpdate.fields['Connector Notes'], `ARB subscription ${arb.subscriptionId} created starting ${item.firstBillingDate}.`);
-      }
-      if (!plan.activeIds.has(arb.subscriptionId)) {
-        plan.activeInserts.push({ row: buildActiveRow({ order: item.order, tx: item.tx, subscriptionId: arb.subscriptionId }), subscriptionId: arb.subscriptionId });
-        plan.activeIds.add(arb.subscriptionId);
-      }
-      const onboardingKey = `${normalizeEmail(getCell(item.order.row, item.order.map, 'Email') || transactionEmail(item.tx))}|${getCell(item.order.row, item.order.map, 'Time')}`;
-      if (!plan.onboarding.subIds.has(arb.subscriptionId) && !plan.onboarding.keys.has(onboardingKey)) {
-        plan.onboardingInserts.push({ row: buildOnboardingRow({ order: item.order, tx: item.tx, subscriptionId: arb.subscriptionId }), subscriptionId: arb.subscriptionId });
-        plan.onboarding.subIds.add(arb.subscriptionId);
-        plan.onboarding.keys.add(onboardingKey);
-      }
+      markSubscriptionCreatedOnPlan({
+        plan,
+        item,
+        subscriptionId: arb.subscriptionId,
+        firstBillingDate: item.firstBillingDate
+      });
       results.push({ rowNumber: item.order.rowNumber, status: 'created', subscriptionId: arb.subscriptionId });
     } catch (err) {
       const reason = safeErrorMessage(err);
+      const duplicate = await resolveDuplicateArbSubscription(reason, item).catch(() => null);
+      if (duplicate?.subscriptionId) {
+        markSubscriptionCreatedOnPlan({
+          plan,
+          item,
+          subscriptionId: duplicate.subscriptionId,
+          firstBillingDate: item.firstBillingDate,
+          rowNote: `ARB subscription ${duplicate.subscriptionId} already existed in Auth.Net and matched this order; treated duplicate response as created.`,
+          conversionNote: `Auth.Net reported duplicate subscription ${duplicate.subscriptionId}; verified existing ARB matches amount/start date and treated as created.`
+        });
+        results.push({ rowNumber: item.order.rowNumber, status: 'duplicate-existing-subscription', subscriptionId: duplicate.subscriptionId });
+        continue;
+      }
       item.fields['ARB Creation Status'] = `Failed — ${reason}`;
       item.fields.Notes = appendNote(item.fields.Notes, `ARB failed; not routed to onboarding: ${reason}`);
       const rowUpdate = plan.rowUpdates.find(update => update.rowNumber === item.order.rowNumber);
