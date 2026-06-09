@@ -80,8 +80,11 @@ function computeAuthNetSignature(rawBody, signatureKeyHex) {
   if (!keyHex || keyHex.length < 32 || keyHex.length % 2 !== 0) {
     throw new Error('Invalid Authorize.Net signature key configuration');
   }
+  // Authorize.Net signs webhook bodies using the Signature Key string from the
+  // merchant interface as the HMAC key. The key looks like hex, but it must not
+  // be decoded into bytes before HMAC verification.
   return crypto
-    .createHmac('sha512', Buffer.from(keyHex, 'hex'))
+    .createHmac('sha512', keyHex)
     .update(String(rawBody || ''), 'utf8')
     .digest('hex');
 }

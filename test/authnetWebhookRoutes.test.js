@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 
 const { buildCustomerPaymentProfileChargeRequest } = require('../src/connectors/authnet/client');
 const {
@@ -38,6 +39,14 @@ test('Authorize.Net webhook signature verification accepts SHA512 header', () =>
   const signature = computeAuthNetSignature(rawBody, key);
   const result = verifyAuthNetSignature({ rawBody, signatureHeader: `SHA512=${signature}`, signatureKeyHex: key });
   assert.deepEqual(result, { ok: true, status: 'signature-valid', httpStatus: 200 });
+});
+
+test('Authorize.Net signature calculation uses the signature key string, not decoded hex bytes', () => {
+  const rawBody = JSON.stringify({ eventType: 'net.authorize.payment.authcapture.created', payload: { id: '123' } });
+  const expected = crypto.createHmac('sha512', key).update(rawBody, 'utf8').digest('hex');
+  const wrongDecodedHexKey = crypto.createHmac('sha512', Buffer.from(key, 'hex')).update(rawBody, 'utf8').digest('hex');
+  assert.equal(computeAuthNetSignature(rawBody, key), expected);
+  assert.notEqual(expected, wrongDecodedHexKey);
 });
 
 test('Authorize.Net webhook signature verification rejects tampered payloads', () => {
