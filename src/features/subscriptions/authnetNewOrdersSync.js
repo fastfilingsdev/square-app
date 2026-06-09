@@ -96,6 +96,13 @@ function isNewOrdersAutomationEnabled() {
   return envFlag('FF_BILLING_NEW_ORDERS_AUTOMATION_ENABLED', true);
 }
 
+function isNewOrdersAutoDiscoveryEnabled() {
+  // FF - Billing / New Orders is a Formstack landing tab. By default the
+  // connector must only enrich rows Formstack already created; it must not
+  // manufacture/add new order rows from Auth.Net scans.
+  return envFlag('FF_BILLING_NEW_ORDERS_AUTO_DISCOVERY_ENABLED', false);
+}
+
 function newOrdersAutomationIntervalMs() {
   const minutes = Number(process.env.FF_BILLING_NEW_ORDERS_AUTOMATION_INTERVAL_MINUTES || 15);
   const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 15;
@@ -726,9 +733,11 @@ function valuesContainToken(values, token) {
   return (values || []).some(row => (row || []).some(cell => normalizeString(cell) === needle || normalizeString(cell).includes(needle)));
 }
 
-function discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth, now = nowIso() }) {
+function discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth, now = nowIso(), allowAutoDiscovery = false }) {
   const headers = withMissingHeaders((newOrderRows[0] || []).slice(), [...NEW_ORDER_REQUIRED_HEADERS, ...NEW_ORDER_OPTIONAL_HEADERS]);
   const map = headerMap(headers);
+  if (!allowAutoDiscovery) return { headers, discovered: [] };
+
   const newOrders = tableFromValues(newOrderRows);
   const conversionIndex = indexConversions(conversionRows);
   const existingTransactionIds = new Set();
@@ -1345,7 +1354,8 @@ async function syncAuthNetNewOrders({
     pullRecentTransactions({ lookbackDays, maxDetails, requiredTransactionIds })
   ]);
 
-  const discovery = discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth });
+  const autoDiscoveryEnabled = isNewOrdersAutoDiscoveryEnabled();
+  const discovery = discoverNewOrderRows({ newOrderRows, conversionRows, activeRows, onboardingRows, auth, allowAutoDiscovery: autoDiscoveryEnabled });
   const plannedNewOrderRows = discovery.discovered.length
     ? [discovery.headers, ...(newOrderRows || []).slice(1), ...discovery.discovered.map(item => item.row)]
     : newOrderRows;
@@ -1392,7 +1402,8 @@ async function syncAuthNetNewOrders({
       arbLiveRequested,
       arbLiveEnabled,
       envLiveGate: isArbAutoCreateEnabled(),
-      requestLiveGate: Boolean(allowLiveArb)
+      requestLiveGate: Boolean(allowLiveArb),
+      newOrdersAutoDiscoveryEnabled: autoDiscoveryEnabled
     },
     counts: {
       readyForConversion: plan.ready.length,
@@ -1432,6 +1443,7 @@ module.exports = {
   isApprovedTransaction,
   isArbAutoCreateEnabled,
   isNewOrdersAutomationEnabled,
+  isNewOrdersAutoDiscoveryEnabled,
   newOrdersAutomationIntervalMs,
   newOrdersAutomationLookbackDays,
   newOrdersAutomationMaxDetails,

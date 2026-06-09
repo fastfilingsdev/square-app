@@ -4,6 +4,7 @@ const {
   syncAuthNetNewOrders,
   isArbAutoCreateEnabled,
   isNewOrdersAutomationEnabled,
+  isNewOrdersAutoDiscoveryEnabled,
   newOrdersAutomationIntervalMs,
   newOrdersAutomationLookbackDays,
   newOrdersAutomationMaxDetails
@@ -64,6 +65,7 @@ function createSubscriptionsRouter() {
       subscriptionsSpreadsheetConfigured: Boolean(process.env.FF_SUBSCRIPTIONS_SPREADSHEET_ID || process.env.SUBSCRIPTIONS_SPREADSHEET_ID || process.env.PAYMENT_UPDATE_SPREADSHEET_ID || process.env.GOOGLE_SHEETS_SPREADSHEET_ID),
       onboardingSpreadsheetConfigured: Boolean(process.env.FF_ONBOARDING_SPREADSHEET_ID || process.env.ONBOARDING_SPREADSHEET_ID),
       arbLiveGateEnabled: isArbAutoCreateEnabled(),
+      newOrdersAutoDiscoveryEnabled: isNewOrdersAutoDiscoveryEnabled(),
       automation: {
         enabled: isNewOrdersAutomationEnabled(),
         started: automationState.started,
@@ -78,7 +80,7 @@ function createSubscriptionsRouter() {
         lastCounts: automationState.lastCounts,
         lastGuards: automationState.lastGuards
       },
-      safety: 'Targets FF - Billing / New Orders. Auto-discovers approved non-recurring $20/$29 numeric-invoice checkout transactions, blocks recurring ARB payments/declines/mismatches, creates ARBs only after verified original-charge evidence, then routes to Active Subscriptions and Onboarding. No customer emails, refunds, cancellations, or card/bank data handling.'
+      safety: 'Targets FF - Billing / New Orders. Formstack owns row creation; connector enriches existing New Orders rows with Auth.Net evidence, blocks recurring ARB payments/declines/mismatches, creates ARBs only after verified original-charge evidence, then routes to Active Subscriptions and Onboarding. No customer emails, refunds, cancellations, card/bank data handling, or default Auth.Net row auto-discovery.'
     });
   });
 

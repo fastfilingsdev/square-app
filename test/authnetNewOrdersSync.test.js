@@ -116,7 +116,30 @@ test('new-order guards reject recurring ARB transactions even when amount is 20 
   assert.equal(validation.issues.includes('transaction already belongs to an Auth.Net subscription'), true);
 });
 
-test('auto-discovery appends only approved non-recurring numeric-invoice membership checkout transactions', () => {
+test('auto-discovery is disabled by default because Formstack owns New Orders row creation', () => {
+  const newCheckout = approvedTx({
+    transId: '121659009517',
+    authAmount: '29.00',
+    submitTimeUTC: '2026-06-05T22:31:43Z',
+    customer: { email: 'new@example.test' },
+    billTo: { firstName: 'New', lastName: 'Customer' },
+    order: { invoiceNumber: '1468015046' },
+    recurringBilling: false
+  });
+
+  const discovery = discoverNewOrderRows({
+    newOrderRows: [orderRows()[0]],
+    conversionRows: [['Source New Order Row', 'Order / Invoice #', 'Auth.Net Transaction ID', 'New Subscription ID']],
+    activeRows: [['Subscription ID', 'History']],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-06T12:00:00Z', records: [newCheckout], errors: [] },
+    now: '2026-06-06T12:00:00Z'
+  });
+
+  assert.equal(discovery.discovered.length, 0);
+});
+
+test('explicitly enabled auto-discovery includes only approved non-recurring numeric-invoice membership checkout transactions', () => {
   const newCheckout = approvedTx({
     transId: '121659009517',
     authAmount: '29.00',
@@ -144,7 +167,8 @@ test('auto-discovery appends only approved non-recurring numeric-invoice members
     activeRows: [['Subscription ID', 'History']],
     onboardingRows: [],
     auth: { pulledAtUtc: '2026-06-06T12:00:00Z', records: [newCheckout, recurringPayment, bCatchup], errors: [] },
-    now: '2026-06-06T12:00:00Z'
+    now: '2026-06-06T12:00:00Z',
+    allowAutoDiscovery: true
   });
 
   assert.equal(discovery.discovered.length, 1);
