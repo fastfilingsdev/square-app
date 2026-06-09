@@ -7,6 +7,7 @@ const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation } = require('./src/features/authnetWebhook/routes');
+const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
 
 const app = express();
 app.use(express.json({
@@ -945,6 +946,7 @@ app.get('/callback', async (req, res) => {
 app.use('/payment-update', createPaymentUpdateRouter());
 app.use('/subscriptions', createSubscriptionsRouter());
 app.use('/authnet', createAuthNetWebhookRouter());
+app.use('/billing', createBillingRefundsRouter());
 
 app.get('/', (req, res) => {
   res.send('Server is working');
