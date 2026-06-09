@@ -132,3 +132,28 @@ test('dry-run blocks partial refund greater than refundable balance', async () =
   assert.equal(result.status, 'BLOCKED / ERROR');
   assert.match(result.issues.join('; '), /exceeds refundable balance/);
 });
+
+
+const {
+  allowedRefundGoogleEmails,
+  hasValidBillingAccess
+} = require('../src/features/billingRefunds/routes');
+
+test('refund routes default to Fast Filings Google OAuth allowlist', () => {
+  const allowed = allowedRefundGoogleEmails();
+  assert.equal(allowed.has('returns@fastfilings.com'), true);
+  assert.equal(allowed.has('returns1@fastfilings.com'), true);
+});
+
+test('refund route access accepts verified allowed Google OAuth identity', async () => {
+  const req = {
+    get(name) {
+      if (String(name).toLowerCase() === 'authorization') return 'Bearer google-token';
+      return '';
+    }
+  };
+  const ok = await hasValidBillingAccess(req, {
+    verifyGoogleAccessTokenFn: async token => ({ ok: token === 'google-token', email: 'returns1@fastfilings.com' })
+  });
+  assert.equal(ok, true);
+});
