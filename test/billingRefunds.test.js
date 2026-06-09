@@ -89,6 +89,29 @@ test('lookup by email uses sheet references to fetch transaction details', async
   assert.equal(result.candidates[0].refundable, true);
 });
 
+test('lookup by subscription id includes Auth.Net subscription status in refund candidates', async () => {
+  const sheets = fakeSheets({
+    Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']]
+  });
+  const result = await lookupRefundCandidates({
+    lookup: '73319055',
+    sheets,
+    subscriptionsSpreadsheetId: '',
+    getSubscriptionFn: async id => ({
+      subscription: {
+        id,
+        status: 'active',
+        transactions: [{ transId: '121662802867' }]
+      }
+    }),
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id, subscription: { id: '73319055' } }) }),
+    getTransactionListForCustomerFn: async () => ({ transactions: [] })
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.candidates[0].subscriptionId, '73319055');
+  assert.equal(result.candidates[0].subscriptionStatus, 'active');
+});
+
 test('dry-run validates full and partial refund amounts without live processing', async () => {
   const sheets = fakeSheets({
     Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],

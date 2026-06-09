@@ -168,6 +168,7 @@ function addSet(set, value) {
 function rowRefFromSheet(table, item) {
   const row = item.row;
   const map = item.map;
+  const subscriptionId = firstCell(row, map, ['Subscription ID', 'New Subscription ID', 'Auth.Net Subscription ID', 'Subscription']);
   return {
     workbook: table.workbook,
     tab: table.tab,
@@ -175,7 +176,11 @@ function rowRefFromSheet(table, item) {
     email: normalizeEmail(firstCell(row, map, ['Email', 'Billing Email', 'Customer Email', 'Alt Email'])),
     customerId: firstCell(row, map, ['Customer ID', 'CustomerId', 'Customer']),
     name: firstCell(row, map, ['Name', 'Customer Name', 'Business Name']),
-    subscriptionId: firstCell(row, map, ['Subscription ID', 'New Subscription ID', 'Auth.Net Subscription ID', 'Subscription']),
+    subscriptionId,
+    subscriptionStatus: subscriptionId ? firstCell(row, map, [
+      'Subscription Status', 'Sub Status', 'Auth.Net Subscription Status', 'AuthNet Subscription Status',
+      'ARB Status', 'Auth.Net Status', 'AuthNet Status', 'Status', 'Payment Status', 'Cancellation Status'
+    ]) : '',
     transactionId: firstCell(row, map, ['Auth.Net Transaction ID', 'Transaction ID', 'Original Transaction ID', 'Refund Transaction ID']),
     invoiceNumber: firstCell(row, map, ['Order / Invoice #', 'Invoice #', 'Invoice Number', 'Original Invoice #']),
     amount: firstCell(row, map, ['Amount', 'Original Amount', 'Refund Amount'])
@@ -264,6 +269,20 @@ function transactionSubscriptionId(tx) {
   return normalizeString(subscription.id || subscription.subscriptionId);
 }
 
+function subscriptionObject(subscriptionResponse) {
+  return subscriptionResponse?.subscription || subscriptionResponse || {};
+}
+
+function subscriptionStatus(subscriptionResponse) {
+  const subscription = subscriptionObject(subscriptionResponse);
+  return normalizeString(subscription.status || subscription.subscriptionStatus || subscription.arbStatus || subscription.state);
+}
+
+function subscriptionIdFromResponse(subscriptionResponse) {
+  const subscription = subscriptionObject(subscriptionResponse);
+  return normalizeString(subscription.id || subscription.subscriptionId);
+}
+
 function transactionCustomerProfileId(tx) {
   return normalizeString(tx?.profile?.customerProfileId || tx?.customer?.customerProfileId);
 }
@@ -340,7 +359,24 @@ function sheetRefundTotal(tables, originalTransactionId) {
   return Number(total.toFixed(2));
 }
 
-function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [] } = {}) {
+function subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById = new Map()) {
+  const subId = transactionSubscriptionId(tx);
+  const id = transactionId(tx);
+  const invoice = transactionInvoice(tx);
+  if (subId && subscriptionStatusById.has(subId)) return subscriptionStatusById.get(subId);
+
+  const exactRef = matchedRefs.find(ref => ref.subscriptionStatus && (
+    (subId && ref.subscriptionId === subId)
+    || (id && ref.transactionId === id)
+    || (invoice && ref.invoiceNumber === invoice)
+  ));
+  if (exactRef) return exactRef.subscriptionStatus;
+
+  const anySubRef = matchedRefs.find(ref => ref.subscriptionStatus && ref.subscriptionId);
+  return anySubRef ? anySubRef.subscriptionStatus : '';
+}
+
+function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [], subscriptionStatusById = new Map() } = {}) {
   const id = transactionId(tx);
   const originalAmount = amountNumber(transactionAmount(tx));
   const authNetRefunded = authNetRefundTotal(tx);
@@ -379,6 +415,7 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
     name,
     customerId,
     subscriptionId: transactionSubscriptionId(tx) || matchedRefs.find(ref => ref.subscriptionId)?.subscriptionId || '',
+    subscriptionStatus: subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById),
     cardLast4: last4,
     source,
     sourceRows: matchedRefs.slice(0, 10).map(ref => ({ workbook: ref.workbook, tab: ref.tab, rowNumber: ref.rowNumber }))
@@ -387,7 +424,7 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
 
 function collectTransactionIdsFromSubscription(subscriptionResponse) {
   const ids = new Set();
-  const subscription = subscriptionResponse?.subscription || subscriptionResponse || {};
+  const subscription = subscriptionObject(subscriptionResponse);
   const transactionContainers = [
     subscription.transactions,
     subscription.transaction,
@@ -400,6 +437,8 @@ function collectTransactionIdsFromSubscription(subscriptionResponse) {
   });
   return {
     ids,
+    id: subscriptionIdFromResponse(subscriptionResponse),
+    status: subscriptionStatus(subscriptionResponse),
     customerProfileId: normalizeString(subscription?.profile?.customerProfileId || subscription?.customerProfileId)
   };
 }
@@ -465,12 +504,14 @@ async function lookupRefundCandidates({
   const collected = collectSheetReferences(tables, text);
   const txIds = new Set(collected.txIds);
   const customerProfileIds = new Set();
+  const subscriptionStatusById = new Map();
 
   for (const subId of Array.from(collected.subIds).slice(0, 25)) {
     const subscription = await safeGetSubscription(subId, getSubscriptionFn, notes);
     if (!subscription) continue;
     const fromSub = collectTransactionIdsFromSubscription(subscription);
     fromSub.ids.forEach(id => addSet(txIds, id));
+    if (fromSub.status) subscriptionStatusById.set(fromSub.id || subId, fromSub.status);
     addSet(customerProfileIds, fromSub.customerProfileId);
   }
 
@@ -502,7 +543,8 @@ async function lookupRefundCandidates({
       tables,
       candidateNumber: candidates.length + 1,
       source: matchedRefs.length ? 'sheet+authnet' : 'authnet',
-      matchedRefs
+      matchedRefs,
+      subscriptionStatusById
     });
     // Keep non-refundable matches in the response for safety/diagnosis, but sort refundable first below.
     candidates.push(candidate);
