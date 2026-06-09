@@ -9,6 +9,13 @@ const {
     tableFromValues
   }
 } = require('../src/features/billingRefunds/refundLookup');
+const {
+  processRefundLive,
+  __billingRefundProcessTestHooks
+} = require('../src/features/billingRefunds/refundProcess');
+const {
+  buildRefundTransactionRequest
+} = require('../src/connectors/authnet/client');
 
 function fakeSheets(ranges) {
   return {
@@ -154,6 +161,83 @@ test('dry-run blocks partial refund greater than refundable balance', async () =
   assert.equal(result.ok, false);
   assert.equal(result.status, 'BLOCKED / ERROR');
   assert.match(result.issues.join('; '), /exceeds refundable balance/);
+});
+
+test('Authorize.Net refund request uses original transaction, amount, last4, and suppresses customer email', () => {
+  const payload = buildRefundTransactionRequest({
+    refTransId: '121662802867',
+    amount: '20',
+    cardLast4: '1111',
+    invoiceNumber: '1467834568',
+    emailCustomer: false
+  }, { name: 'login', transactionKey: 'key' });
+  const tx = payload.createTransactionRequest.transactionRequest;
+  assert.equal(tx.transactionType, 'refundTransaction');
+  assert.equal(tx.amount, '20.00');
+  assert.equal(tx.refTransId, '121662802867');
+  assert.equal(tx.payment.creditCard.cardNumber, '1111');
+  assert.equal(tx.payment.creditCard.expirationDate, 'XXXX');
+  assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
+});
+
+test('live refund process remains blocked when live gate is disabled', async () => {
+  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  const result = await processRefundLive({
+    lookup: 'customer@example.test',
+    transactionId: '121662802867',
+    refundType: 'FULL',
+    reason: 'Duplicate',
+    approvedBy: 'Gilmar Arellano',
+    liveConfirm: 'PROCESS LIVE REFUND',
+    sheets: fakeSheets({
+      Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
+      'New Orders': [['Email', 'Auth.Net Transaction ID'], ['customer@example.test', '121662802867']]
+    }),
+    subscriptionsSpreadsheetId: '',
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id }) }),
+    getSubscriptionFn: async () => { throw new Error('not expected'); },
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    refundTransactionFn: async () => { throw new Error('should not refund'); }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'LIVE REFUND DISABLED');
+  assert.match(result.issues.join('; '), /live refund gate is disabled/);
+});
+
+test('live refund process can execute only after gate and confirmation', async () => {
+  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+  let refundRequest;
+  const result = await processRefundLive({
+    lookup: 'customer@example.test',
+    transactionId: '121662802867',
+    refundType: 'PARTIAL',
+    refundAmount: '10.00',
+    reason: 'Duplicate',
+    approvedBy: 'Gilmar Arellano',
+    liveConfirm: 'PROCESS LIVE REFUND',
+    sheets: fakeSheets({
+      Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
+      'New Orders': [['Email', 'Auth.Net Transaction ID'], ['customer@example.test', '121662802867']]
+    }),
+    subscriptionsSpreadsheetId: '',
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id }) }),
+    getSubscriptionFn: async () => { throw new Error('not expected'); },
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    refundTransactionFn: async request => {
+      refundRequest = request;
+      return { transactionResponse: { responseCode: '1', transId: '987654321', messages: { message: [{ code: '1', description: 'Approved' }] } } };
+    }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 'REFUNDED');
+  assert.equal(result.refundTransactionId, '987654321');
+  assert.equal(result.customerEmailSent, false);
+  assert.equal(refundRequest.emailCustomer, false);
+  assert.equal(refundRequest.refTransId, '121662802867');
+  assert.equal(refundRequest.amount, '10.00');
+  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 
 

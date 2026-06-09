@@ -1,6 +1,7 @@
 const axios = require('axios');
 const express = require('express');
 const { buildRefundDryRun, lookupRefundCandidates, FF_BILLING_SPREADSHEET_ID, FF_SUBSCRIPTIONS_SPREADSHEET_ID } = require('./refundLookup');
+const { liveRefundsEnabled, processRefundLive } = require('./refundProcess');
 
 function bearerToken(req) {
   const auth = String(req.get('authorization') || '').trim();
@@ -69,8 +70,10 @@ function createBillingRefundsRouter() {
       authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
       billingSpreadsheetConfigured: Boolean(FF_BILLING_SPREADSHEET_ID()),
       subscriptionsSpreadsheetConfigured: Boolean(FF_SUBSCRIPTIONS_SPREADSHEET_ID()),
-      liveRefundsEnabled: false,
-      safety: 'Refund lookup/dry-run only. Protected by admin token or verified Google OAuth allowlist. Live Auth.Net refund execution and customer emails are disabled/not implemented in this phase.'
+      liveRefundsEnabled: liveRefundsEnabled(),
+      liveRefundRequires: ['DRY-RUN OK', 'Approved By', 'Reason', 'typed confirmation', 'FF_BILLING_REFUNDS_LIVE_ENABLED=true'],
+      customerEmailsSentByRefundRoute: false,
+      safety: 'Refund lookup/dry-run/live-process route protected by admin token or verified Google OAuth allowlist. Live Auth.Net refund execution is disabled unless the explicit live gate is enabled and the request passes final guards. Customer emails are never sent by this route.'
     });
   });
 
@@ -102,13 +105,20 @@ function createBillingRefundsRouter() {
 
   router.post('/refunds/process', async (req, res) => {
     if (!await requireBillingAccess(req, res)) return;
-    return res.status(409).json({
-      ok: false,
-      status: 'LIVE REFUND DISABLED',
-      error: 'Live Auth.Net refund execution is intentionally disabled in this phase. Use /billing/refunds/lookup and /billing/refunds/dry-run for safe validation first.',
-      liveRefundsEnabled: false,
-      safety: 'No Auth.Net refund, void, charge, cancellation, ARB mutation, customer email, raw card/bank/profile data, or Returns operational edit was performed.'
-    });
+    try {
+      const result = await processRefundLive(req.body || {});
+      res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+      return res.status(result.ok ? 200 : 409).json(result);
+    } catch (err) {
+      console.error('FF BILLING LIVE REFUND ERROR:', err.message);
+      return res.status(500).json({
+        ok: false,
+        status: 'BLOCKED / ERROR',
+        error: err.message,
+        liveRefundsEnabled: liveRefundsEnabled(),
+        safety: 'Live refund attempt failed or was blocked. No customer email was sent by this route.'
+      });
+    }
   });
 
   return router;

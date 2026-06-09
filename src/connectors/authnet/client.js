@@ -69,6 +69,70 @@ async function getTransactionListForCustomer(customerProfileId, config = getAuth
   }, config);
 }
 
+function buildRefundTransactionRequest({
+  refTransId,
+  amount,
+  cardLast4,
+  invoiceNumber = '',
+  description = 'Fast Filings refund',
+  emailCustomer = false,
+  refId = ''
+}, merchantAuthentication) {
+  const normalizedAmount = Number(amount);
+  const last4 = String(cardLast4 || '').replace(/\D/g, '').slice(-4);
+  if (!refTransId) throw new Error('Missing original Authorize.Net transaction ID for refund');
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) throw new Error('Invalid Authorize.Net refund amount');
+  if (last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
+
+  return {
+    createTransactionRequest: {
+      merchantAuthentication,
+      ...(refId ? { refId: String(refId).slice(0, 20) } : {}),
+      transactionRequest: {
+        transactionType: 'refundTransaction',
+        amount: normalizedAmount.toFixed(2),
+        payment: {
+          creditCard: {
+            cardNumber: last4,
+            expirationDate: 'XXXX'
+          }
+        },
+        refTransId: String(refTransId),
+        ...(invoiceNumber || description ? {
+          order: {
+            ...(invoiceNumber ? { invoiceNumber: String(invoiceNumber).slice(0, 20) } : {}),
+            ...(description ? { description: String(description).slice(0, 255) } : {})
+          }
+        } : {}),
+        transactionSettings: {
+          setting: [{ settingName: 'emailCustomer', settingValue: emailCustomer ? 'true' : 'false' }]
+        }
+      }
+    }
+  };
+}
+
+async function refundTransaction({
+  refTransId,
+  amount,
+  cardLast4,
+  invoiceNumber = '',
+  description = 'Fast Filings refund',
+  emailCustomer = false,
+  refId = ''
+}, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  return authNetPost(buildRefundTransactionRequest({
+    refTransId,
+    amount,
+    cardLast4,
+    invoiceNumber,
+    description,
+    emailCustomer,
+    refId
+  }, merchantAuthentication), config);
+}
+
 async function getHostedProfilePageToken(customerProfileId, hostedProfileSettings = [], config = getAuthNetConfig()) {
   const merchantAuthentication = getMerchantAuthentication(config);
   const data = await authNetPost({
@@ -180,11 +244,13 @@ async function chargeCustomerPaymentProfile({
 module.exports = {
   authNetPost,
   buildCustomerPaymentProfileChargeRequest,
+  buildRefundTransactionRequest,
   chargeCustomerPaymentProfile,
   getAuthNetConfig,
   getHostedPaymentPageToken,
   getHostedProfilePageToken,
   getMerchantAuthentication,
+  refundTransaction,
   getSubscription,
   getTransactionDetails,
   getTransactionListForCustomer
