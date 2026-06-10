@@ -164,7 +164,7 @@ test('dry-run blocks partial refund greater than refundable balance', async () =
   assert.match(result.issues.join('; '), /exceeds refundable balance/);
 });
 
-test('Authorize.Net refund request uses original transaction, amount, last4, and suppresses customer email', () => {
+test('Authorize.Net refund request uses original transaction, amount, masked last4, and suppresses customer email', () => {
   const payload = buildRefundTransactionRequest({
     refTransId: '121662802867',
     amount: '20',
@@ -176,7 +176,7 @@ test('Authorize.Net refund request uses original transaction, amount, last4, and
   assert.equal(tx.transactionType, 'refundTransaction');
   assert.equal(tx.amount, '20.00');
   assert.equal(tx.refTransId, '121662802867');
-  assert.equal(tx.payment.creditCard.cardNumber, '1111');
+  assert.equal(tx.payment.creditCard.cardNumber, 'XXXX1111');
   assert.equal(tx.payment.creditCard.expirationDate, 'XXXX');
   assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
 });

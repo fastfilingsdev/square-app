@@ -123,6 +123,10 @@ function buildRefundTransactionRequest({
   if (!refTransId) throw new Error('Missing original Authorize.Net transaction ID for refund');
   if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) throw new Error('Invalid Authorize.Net refund amount');
   if (last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
+  // Linked Authorize.Net refunds require the original transaction plus the
+  // original payment's masked card number. Transaction detail returns this as
+  // XXXX1234; preserve that request shape instead of sending bare last4.
+  const maskedCardNumber = `XXXX${last4}`;
 
   return {
     createTransactionRequest: {
@@ -133,7 +137,7 @@ function buildRefundTransactionRequest({
         amount: normalizedAmount.toFixed(2),
         payment: {
           creditCard: {
-            cardNumber: last4,
+            cardNumber: maskedCardNumber,
             expirationDate: 'XXXX'
           }
         },
