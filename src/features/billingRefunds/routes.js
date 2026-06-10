@@ -71,6 +71,7 @@ function createBillingRefundsRouter() {
       billingSpreadsheetConfigured: Boolean(FF_BILLING_SPREADSHEET_ID()),
       subscriptionsSpreadsheetConfigured: Boolean(FF_SUBSCRIPTIONS_SPREADSHEET_ID()),
       liveRefundsEnabled: liveRefundsEnabled(),
+      refundFailureReporting: 'structured-authnet-transaction-response-errors',
       liveRefundRequires: ['DRY-RUN OK', 'Approved By', 'Reason', 'typed confirmation', 'FF_BILLING_REFUNDS_LIVE_ENABLED=true'],
       customerEmailsSentByRefundRoute: false,
       safety: 'Refund lookup/dry-run/live-process route protected by admin token or verified Google OAuth allowlist. Live Auth.Net refund execution is disabled unless the explicit live gate is enabled and the request passes final guards. Customer emails are never sent by this route.'
