@@ -160,6 +160,8 @@ async function processRefundLive({
       cardLast4: selected.cardLast4,
       customerProfileId: useProfileFallback ? selected.__refundProfile.customerProfileId : '',
       customerPaymentProfileId: useProfileFallback ? selected.__refundProfile.customerPaymentProfileId : '',
+      customer: selected.__refundRequiredFields?.customer || null,
+      billTo: selected.__refundRequiredFields?.billTo || null,
       invoiceNumber: selected.invoiceNumber,
       description: `Fast Filings refund ${selected.invoiceNumber || selected.transactionId}`,
       emailCustomer: false,

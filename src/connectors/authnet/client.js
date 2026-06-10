@@ -148,6 +148,8 @@ function buildRefundTransactionRequest({
   cardLast4,
   customerProfileId = '',
   customerPaymentProfileId = '',
+  customer = null,
+  billTo = null,
   invoiceNumber = '',
   description = 'Fast Filings refund',
   emailCustomer = false,
@@ -179,6 +181,19 @@ function buildRefundTransactionRequest({
     }
   };
 
+  const cleanField = value => String(value == null ? '' : value).trim();
+  const allowedBillTo = ['firstName', 'lastName', 'company', 'address', 'city', 'state', 'zip', 'country', 'phoneNumber'];
+  const billToPayload = billTo && typeof billTo === 'object'
+    ? Object.fromEntries(allowedBillTo
+      .map(key => [key, cleanField(billTo[key])])
+      .filter(([, value]) => value))
+    : null;
+  const customerPayload = customer && typeof customer === 'object'
+    ? Object.fromEntries(['id', 'email']
+      .map(key => [key, cleanField(customer[key])])
+      .filter(([, value]) => value))
+    : null;
+
   return {
     createTransactionRequest: {
       merchantAuthentication,
@@ -194,6 +209,8 @@ function buildRefundTransactionRequest({
             ...(description ? { description: String(description).slice(0, 255) } : {})
           }
         } : {}),
+        ...(customerPayload && Object.keys(customerPayload).length ? { customer: customerPayload } : {}),
+        ...(billToPayload && Object.keys(billToPayload).length ? { billTo: billToPayload } : {}),
         transactionSettings: {
           setting: [{ settingName: 'emailCustomer', settingValue: emailCustomer ? 'true' : 'false' }]
         }
@@ -208,6 +225,8 @@ async function refundTransaction({
   cardLast4,
   customerProfileId = '',
   customerPaymentProfileId = '',
+  customer = null,
+  billTo = null,
   invoiceNumber = '',
   description = 'Fast Filings refund',
   emailCustomer = false,
@@ -220,6 +239,8 @@ async function refundTransaction({
     cardLast4,
     customerProfileId,
     customerPaymentProfileId,
+    customer,
+    billTo,
     invoiceNumber,
     description,
     emailCustomer,

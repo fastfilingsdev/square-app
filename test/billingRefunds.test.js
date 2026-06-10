@@ -202,6 +202,32 @@ test('Authorize.Net refund request can use customer profile payment profile inst
   assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
 });
 
+test('Authorize.Net refund request can carry original required customer and bill-to fields', () => {
+  const payload = buildRefundTransactionRequest({
+    refTransId: '121662802867',
+    amount: '20',
+    cardLast4: '1111',
+    invoiceNumber: '1467834568',
+    customer: { id: 'CUST-1', email: 'customer@example.test' },
+    billTo: {
+      firstName: 'Test',
+      lastName: 'Customer',
+      address: '123 Main St',
+      city: 'Miami',
+      state: 'FL',
+      zip: '33101',
+      country: 'US',
+      phoneNumber: '5555550100'
+    },
+    emailCustomer: false
+  }, { name: 'login', transactionKey: 'key' });
+  const tx = payload.createTransactionRequest.transactionRequest;
+  assert.equal(tx.refTransId, '121662802867');
+  assert.equal(tx.customer.email, 'customer@example.test');
+  assert.equal(tx.billTo.firstName, 'Test');
+  assert.equal(tx.billTo.address, '123 Main St');
+});
+
 test('Authorize.Net refund errors preserve transactionResponse details behind E00027', () => {
   const message = formatAuthNetErrorMessage({
     transactionResponse: {
@@ -307,7 +333,12 @@ test('live refund process prefers original transaction card last4 over current s
         }
       }
     }),
-    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id, subscription: { id: '73319055' } }) }),
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({
+      transId: id,
+      subscription: { id: '73319055' },
+      customer: { id: 'CUST-1', email: 'customer@example.test' },
+      billTo: { firstName: 'Test', lastName: 'Customer', address: '123 Main St', city: 'Miami', state: 'FL', zip: '33101', country: 'US' }
+    }) }),
     getTransactionListForCustomerFn: async () => ({ transactions: [] }),
     refundTransactionFn: async request => {
       refundRequest = request;
@@ -319,8 +350,11 @@ test('live refund process prefers original transaction card last4 over current s
   assert.equal(refundRequest.cardLast4, '1111');
   assert.equal(refundRequest.customerProfileId, '');
   assert.equal(refundRequest.customerPaymentProfileId, '');
+  assert.deepEqual(refundRequest.customer, { id: 'CUST-1', email: 'customer@example.test' });
+  assert.equal(refundRequest.billTo.address, '123 Main St');
   assert.equal(JSON.stringify(result).includes('40338125'), false);
   assert.equal(JSON.stringify(result).includes('1000177237'), false);
+  assert.equal(JSON.stringify(result).includes('123 Main St'), false);
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });

@@ -309,6 +309,21 @@ function transactionBillToName(tx) {
   return [first, last].filter(Boolean).join(' ').trim();
 }
 
+function refundRequiredFieldsFromTransaction(tx) {
+  const customer = tx?.customer || {};
+  const billTo = tx?.billTo || {};
+  const clean = value => normalizeString(value);
+  const pick = (source, keys) => Object.fromEntries(keys
+    .map(key => [key, clean(source?.[key])])
+    .filter(([, value]) => value));
+  const customerPayload = pick(customer, ['id', 'email']);
+  const billToPayload = pick(billTo, ['firstName', 'lastName', 'company', 'address', 'city', 'state', 'zip', 'country', 'phoneNumber']);
+  return {
+    customer: Object.keys(customerPayload).length ? customerPayload : null,
+    billTo: Object.keys(billToPayload).length ? billToPayload : null
+  };
+}
+
 function cardLast4(tx) {
   const payment = tx?.payment || {};
   const creditCard = payment.creditCard || {};
@@ -440,6 +455,14 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
   if (subscriptionId && refundProfileBySubscriptionId.has(subscriptionId)) {
     Object.defineProperty(candidate, '__refundProfile', {
       value: refundProfileBySubscriptionId.get(subscriptionId),
+      enumerable: false,
+      configurable: false
+    });
+  }
+  const requiredFields = refundRequiredFieldsFromTransaction(tx);
+  if (requiredFields.customer || requiredFields.billTo) {
+    Object.defineProperty(candidate, '__refundRequiredFields', {
+      value: requiredFields,
       enumerable: false,
       configurable: false
     });
