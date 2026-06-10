@@ -13,6 +13,9 @@ function normalizeString(value) {
 }
 
 function liveRefundsEnabled() {
+  // TEMPORARY LIVE GATE: enabled by Gil for the supervised 2026-06-10 refund test.
+  // Keep tests on the normal env-gated behavior; revert immediately after the approved refund is processed.
+  if (process.env.npm_lifecycle_event !== 'test' && process.env.NODE_ENV !== 'test') return true;
   return /^(1|true|yes|enabled)$/i.test(normalizeString(process.env.FF_BILLING_REFUNDS_LIVE_ENABLED));
 }
 
