@@ -181,6 +181,27 @@ test('Authorize.Net refund request uses original transaction, amount, masked las
   assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
 });
 
+test('Authorize.Net refund request can use customer profile payment profile instead of card details', () => {
+  const payload = buildRefundTransactionRequest({
+    refTransId: '121662802867',
+    amount: '20',
+    customerProfileId: '40338125',
+    customerPaymentProfileId: '1000177237',
+    invoiceNumber: '1467834568',
+    emailCustomer: false
+  }, { name: 'login', transactionKey: 'key' });
+  const tx = payload.createTransactionRequest.transactionRequest;
+  assert.equal(tx.transactionType, 'refundTransaction');
+  assert.equal(tx.amount, '20.00');
+  assert.equal(tx.refTransId, '121662802867');
+  assert.deepEqual(tx.profile, {
+    customerProfileId: '40338125',
+    paymentProfile: { paymentProfileId: '1000177237' }
+  });
+  assert.equal(tx.payment, undefined);
+  assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
+});
+
 test('Authorize.Net refund errors preserve transactionResponse details behind E00027', () => {
   const message = formatAuthNetErrorMessage({
     transactionResponse: {
@@ -254,6 +275,51 @@ test('live refund process can execute only after gate and confirmation', async (
   assert.equal(refundRequest.emailCustomer, false);
   assert.equal(refundRequest.refTransId, '121662802867');
   assert.equal(refundRequest.amount, '10.00');
+  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+});
+
+test('live refund process uses profile refund identifiers for subscription-backed transactions without returning them', async () => {
+  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+  let refundRequest;
+  const result = await processRefundLive({
+    lookup: 'customer@example.test',
+    transactionId: '121662802867',
+    refundType: 'FULL',
+    reason: 'Duplicate Charge',
+    approvedBy: 'Gilmar Arellano',
+    liveConfirm: 'PROCESS LIVE REFUND',
+    sheets: fakeSheets({
+      Refunds: [
+        ['Lookup', 'Email', 'Subscription ID', 'Original Transaction ID'],
+        ['customer@example.test', 'customer@example.test', '73319055', '121662802867']
+      ]
+    }),
+    subscriptionsSpreadsheetId: '',
+    getSubscriptionFn: async id => ({
+      subscription: {
+        id,
+        status: 'canceled',
+        profile: {
+          customerProfileId: '40338125',
+          paymentProfile: { customerPaymentProfileId: '1000177237' }
+        }
+      }
+    }),
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id, subscription: { id: '73319055' } }) }),
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    refundTransactionFn: async request => {
+      refundRequest = request;
+      return { transactionResponse: { responseCode: '1', transId: '987654321', messages: { message: [{ code: '1', description: 'Approved' }] } } };
+    }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.refundTransactionId, '987654321');
+  assert.equal(refundRequest.customerProfileId, '40338125');
+  assert.equal(refundRequest.customerPaymentProfileId, '1000177237');
+  assert.equal(JSON.stringify(result).includes('40338125'), false);
+  assert.equal(JSON.stringify(result).includes('1000177237'), false);
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });

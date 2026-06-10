@@ -283,6 +283,21 @@ function subscriptionIdFromResponse(subscriptionResponse) {
   return normalizeString(subscription.id || subscription.subscriptionId);
 }
 
+function subscriptionRefundProfile(subscriptionResponse) {
+  const subscription = subscriptionObject(subscriptionResponse);
+  const profile = subscription.profile || {};
+  const paymentProfile = profile.paymentProfile || {};
+  const customerProfileId = normalizeString(profile.customerProfileId || subscription.customerProfileId);
+  const customerPaymentProfileId = normalizeString(
+    paymentProfile.customerPaymentProfileId
+    || paymentProfile.paymentProfileId
+    || profile.customerPaymentProfileId
+    || subscription.customerPaymentProfileId
+  );
+  if (!customerProfileId || !customerPaymentProfileId) return null;
+  return { customerProfileId, customerPaymentProfileId };
+}
+
 function transactionCustomerProfileId(tx) {
   return normalizeString(tx?.profile?.customerProfileId || tx?.customer?.customerProfileId);
 }
@@ -376,7 +391,7 @@ function subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById 
   return anySubRef ? anySubRef.subscriptionStatus : '';
 }
 
-function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [], subscriptionStatusById = new Map() } = {}) {
+function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [], subscriptionStatusById = new Map(), refundProfileBySubscriptionId = new Map() } = {}) {
   const id = transactionId(tx);
   const originalAmount = amountNumber(transactionAmount(tx));
   const authNetRefunded = authNetRefundTotal(tx);
@@ -397,8 +412,9 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
   const email = transactionEmail(tx) || matchedRefs.find(ref => ref.email)?.email || '';
   const name = transactionBillToName(tx) || matchedRefs.find(ref => ref.name)?.name || '';
   const customerId = matchedRefs.find(ref => ref.customerId)?.customerId || '';
+  const subscriptionId = transactionSubscriptionId(tx) || matchedRefs.find(ref => ref.subscriptionId)?.subscriptionId || '';
 
-  return {
+  const candidate = {
     candidateNumber,
     refundable: issues.length === 0,
     blockReason: issues.join('; '),
@@ -414,12 +430,21 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
     email,
     name,
     customerId,
-    subscriptionId: transactionSubscriptionId(tx) || matchedRefs.find(ref => ref.subscriptionId)?.subscriptionId || '',
+    subscriptionId,
     subscriptionStatus: subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById),
     cardLast4: last4,
+    refundProfileAvailable: Boolean(subscriptionId && refundProfileBySubscriptionId.has(subscriptionId)),
     source,
     sourceRows: matchedRefs.slice(0, 10).map(ref => ({ workbook: ref.workbook, tab: ref.tab, rowNumber: ref.rowNumber }))
   };
+  if (subscriptionId && refundProfileBySubscriptionId.has(subscriptionId)) {
+    Object.defineProperty(candidate, '__refundProfile', {
+      value: refundProfileBySubscriptionId.get(subscriptionId),
+      enumerable: false,
+      configurable: false
+    });
+  }
+  return candidate;
 }
 
 function collectTransactionIdsFromSubscription(subscriptionResponse) {
@@ -439,7 +464,8 @@ function collectTransactionIdsFromSubscription(subscriptionResponse) {
     ids,
     id: subscriptionIdFromResponse(subscriptionResponse),
     status: subscriptionStatus(subscriptionResponse),
-    customerProfileId: normalizeString(subscription?.profile?.customerProfileId || subscription?.customerProfileId)
+    customerProfileId: normalizeString(subscription?.profile?.customerProfileId || subscription?.customerProfileId),
+    refundProfile: subscriptionRefundProfile(subscriptionResponse)
   };
 }
 
@@ -505,6 +531,7 @@ async function lookupRefundCandidates({
   const txIds = new Set(collected.txIds);
   const customerProfileIds = new Set();
   const subscriptionStatusById = new Map();
+  const refundProfileBySubscriptionId = new Map();
 
   for (const subId of Array.from(collected.subIds).slice(0, 25)) {
     const subscription = await safeGetSubscription(subId, getSubscriptionFn, notes);
@@ -512,6 +539,7 @@ async function lookupRefundCandidates({
     const fromSub = collectTransactionIdsFromSubscription(subscription);
     fromSub.ids.forEach(id => addSet(txIds, id));
     if (fromSub.status) subscriptionStatusById.set(fromSub.id || subId, fromSub.status);
+    if (fromSub.refundProfile) refundProfileBySubscriptionId.set(fromSub.id || subId, fromSub.refundProfile);
     addSet(customerProfileIds, fromSub.customerProfileId);
   }
 
@@ -544,7 +572,8 @@ async function lookupRefundCandidates({
       candidateNumber: candidates.length + 1,
       source: matchedRefs.length ? 'sheet+authnet' : 'authnet',
       matchedRefs,
-      subscriptionStatusById
+      subscriptionStatusById,
+      refundProfileBySubscriptionId
     });
     // Keep non-refundable matches in the response for safety/diagnosis, but sort refundable first below.
     candidates.push(candidate);

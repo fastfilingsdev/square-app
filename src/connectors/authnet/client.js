@@ -113,6 +113,8 @@ function buildRefundTransactionRequest({
   refTransId,
   amount,
   cardLast4,
+  customerProfileId = '',
+  customerPaymentProfileId = '',
   invoiceNumber = '',
   description = 'Fast Filings refund',
   emailCustomer = false,
@@ -122,11 +124,27 @@ function buildRefundTransactionRequest({
   const last4 = String(cardLast4 || '').replace(/\D/g, '').slice(-4);
   if (!refTransId) throw new Error('Missing original Authorize.Net transaction ID for refund');
   if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) throw new Error('Invalid Authorize.Net refund amount');
-  if (last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
+  const profileRefund = Boolean(customerProfileId && customerPaymentProfileId);
+  if (!profileRefund && last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
   // Linked Authorize.Net refunds require the original transaction plus the
   // original payment's masked card number. Transaction detail returns this as
   // XXXX1234; preserve that request shape instead of sending bare last4.
   const maskedCardNumber = `XXXX${last4}`;
+  const paymentOrProfile = profileRefund ? {
+    profile: {
+      customerProfileId: String(customerProfileId),
+      paymentProfile: {
+        paymentProfileId: String(customerPaymentProfileId)
+      }
+    }
+  } : {
+    payment: {
+      creditCard: {
+        cardNumber: maskedCardNumber,
+        expirationDate: 'XXXX'
+      }
+    }
+  };
 
   return {
     createTransactionRequest: {
@@ -135,12 +153,7 @@ function buildRefundTransactionRequest({
       transactionRequest: {
         transactionType: 'refundTransaction',
         amount: normalizedAmount.toFixed(2),
-        payment: {
-          creditCard: {
-            cardNumber: maskedCardNumber,
-            expirationDate: 'XXXX'
-          }
-        },
+        ...paymentOrProfile,
         refTransId: String(refTransId),
         ...(invoiceNumber || description ? {
           order: {
@@ -160,6 +173,8 @@ async function refundTransaction({
   refTransId,
   amount,
   cardLast4,
+  customerProfileId = '',
+  customerPaymentProfileId = '',
   invoiceNumber = '',
   description = 'Fast Filings refund',
   emailCustomer = false,
@@ -170,6 +185,8 @@ async function refundTransaction({
     refTransId,
     amount,
     cardLast4,
+    customerProfileId,
+    customerPaymentProfileId,
     invoiceNumber,
     description,
     emailCustomer,

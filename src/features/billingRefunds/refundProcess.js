@@ -151,6 +151,8 @@ async function processRefundLive({
       refTransId: selected.transactionId,
       amount: dryRun.refundAmount,
       cardLast4: selected.cardLast4,
+      customerProfileId: selected.__refundProfile?.customerProfileId || '',
+      customerPaymentProfileId: selected.__refundProfile?.customerPaymentProfileId || '',
       invoiceNumber: selected.invoiceNumber,
       description: `Fast Filings refund ${selected.invoiceNumber || selected.transactionId}`,
       emailCustomer: false,
