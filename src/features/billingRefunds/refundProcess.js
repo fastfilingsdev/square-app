@@ -147,12 +147,19 @@ async function processRefundLive({
   }
 
   try {
+    // Authorize.Net requires the refund payment object to match the original
+    // transaction's payment instrument. Subscription records may point at the
+    // customer's current ARB payment profile, which can differ from the card
+    // that issued the original charge after a card update. Prefer the masked
+    // card last4 from getTransactionDetails when available; use a profile only
+    // as a fallback when transaction detail does not expose card last4.
+    const useProfileFallback = !selected.cardLast4 && selected.__refundProfile;
     const authNetResponse = await refundTransactionFn({
       refTransId: selected.transactionId,
       amount: dryRun.refundAmount,
       cardLast4: selected.cardLast4,
-      customerProfileId: selected.__refundProfile?.customerProfileId || '',
-      customerPaymentProfileId: selected.__refundProfile?.customerPaymentProfileId || '',
+      customerProfileId: useProfileFallback ? selected.__refundProfile.customerProfileId : '',
+      customerPaymentProfileId: useProfileFallback ? selected.__refundProfile.customerPaymentProfileId : '',
       invoiceNumber: selected.invoiceNumber,
       description: `Fast Filings refund ${selected.invoiceNumber || selected.transactionId}`,
       emailCustomer: false,

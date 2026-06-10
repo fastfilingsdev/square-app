@@ -279,7 +279,7 @@ test('live refund process can execute only after gate and confirmation', async (
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 
-test('live refund process uses profile refund identifiers for subscription-backed transactions without returning them', async () => {
+test('live refund process prefers original transaction card last4 over current subscription payment profile', async () => {
   process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
   __billingRefundProcessTestHooks.recentRefunds.clear();
   let refundRequest;
@@ -316,8 +316,9 @@ test('live refund process uses profile refund identifiers for subscription-backe
   });
   assert.equal(result.ok, true);
   assert.equal(result.refundTransactionId, '987654321');
-  assert.equal(refundRequest.customerProfileId, '40338125');
-  assert.equal(refundRequest.customerPaymentProfileId, '1000177237');
+  assert.equal(refundRequest.cardLast4, '1111');
+  assert.equal(refundRequest.customerProfileId, '');
+  assert.equal(refundRequest.customerPaymentProfileId, '');
   assert.equal(JSON.stringify(result).includes('40338125'), false);
   assert.equal(JSON.stringify(result).includes('1000177237'), false);
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
