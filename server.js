@@ -6,7 +6,7 @@ const path = require('path');
 const { google } = require('googleapis');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
-const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation } = require('./src/features/authnetWebhook/routes');
+const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhookWatchdogAutomation } = require('./src/features/authnetWebhook/routes');
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
 
 const app = express();
@@ -2335,6 +2335,7 @@ app.get('/debug-env', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   startNewOrdersAutomation();
+  startWebhookWatchdogAutomation();
   startAuthNetBFallbackAutomation();
   startRecoveredActiveSyncAutomation();
 });

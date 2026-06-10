@@ -31,6 +31,12 @@ const {
 const {
   syncRecoveredSubsToActive
 } = require('../src/features/subscriptions/recoveredActiveSync');
+const {
+  resetWebhookWatchdogStateForTest,
+  runWebhookWatchdogOnce,
+  shouldReactivateWebhook,
+  summarizeWebhook
+} = require('../src/features/authnetWebhook/watchdog');
 
 const key = 'A'.repeat(128);
 
@@ -124,6 +130,73 @@ test('B webhook full-auto charge mode defaults on but can be forced off by env',
   } finally {
     if (prior === undefined) delete process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED;
     else process.env.AUTHNET_WEBHOOK_B_CHARGE_ENABLED = prior;
+  }
+});
+
+test('Auth.Net webhook watchdog only reactivates the known inactive webhook with expected URL and critical events', () => {
+  const summary = summarizeWebhook({
+    webhookId: '5fad34db-0bc8-4256-8f8a-969ce415258d',
+    name: 'FF Billing Events Webhook',
+    status: 'inactive',
+    url: 'https://fastfilings-api.onrender.com/authnet/webhook',
+    eventTypes: [
+      'net.authorize.customer.paymentProfile.updated',
+      'net.authorize.payment.authcapture.created',
+      'net.authorize.customer.subscription.failed'
+    ]
+  });
+  assert.equal(shouldReactivateWebhook(summary).ok, true);
+
+  assert.equal(shouldReactivateWebhook({ ...summary, status: 'active' }).reason, 'already-active');
+  assert.equal(shouldReactivateWebhook({ ...summary, url: 'https://example.test/other' }).reason, 'webhook-url-mismatch');
+  assert.equal(shouldReactivateWebhook({ ...summary, webhookId: 'other' }).reason, 'webhook-id-mismatch');
+  assert.equal(shouldReactivateWebhook({ ...summary, missingCriticalEvents: ['net.authorize.customer.paymentProfile.updated'] }).reason, 'webhook-critical-events-missing');
+});
+
+test('Auth.Net webhook watchdog sends only status=active patch and verifies after state', async () => {
+  const priorEnabled = process.env.AUTHNET_WEBHOOK_WATCHDOG_ENABLED;
+  const calls = [];
+  try {
+    process.env.AUTHNET_WEBHOOK_WATCHDOG_ENABLED = 'true';
+    resetWebhookWatchdogStateForTest();
+    const inactive = {
+      webhookId: '5fad34db-0bc8-4256-8f8a-969ce415258d',
+      name: 'FF Billing Events Webhook',
+      status: 'inactive',
+      url: 'https://fastfilings-api.onrender.com/authnet/webhook',
+      eventTypes: [
+        'net.authorize.customer.paymentProfile.updated',
+        'net.authorize.payment.authcapture.created',
+        'net.authorize.customer.subscription.failed'
+      ]
+    };
+    const active = { ...inactive, status: 'active' };
+    let getCount = 0;
+    const result = await runWebhookWatchdogOnce({
+      triggeredBy: 'test',
+      getWebhookFn: async webhookId => {
+        calls.push(['get', webhookId]);
+        getCount += 1;
+        return getCount === 1 ? inactive : active;
+      },
+      updateWebhookFn: async (webhookId, patch) => {
+        calls.push(['put', webhookId, patch]);
+        return { ...inactive, ...patch };
+      }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.action, 'reactivated-existing-webhook');
+    assert.deepEqual(calls, [
+      ['get', '5fad34db-0bc8-4256-8f8a-969ce415258d'],
+      ['put', '5fad34db-0bc8-4256-8f8a-969ce415258d', { status: 'active' }],
+      ['get', '5fad34db-0bc8-4256-8f8a-969ce415258d']
+    ]);
+    assert.equal(result.watchdog.reactivations, 1);
+  } finally {
+    resetWebhookWatchdogStateForTest();
+    if (priorEnabled === undefined) delete process.env.AUTHNET_WEBHOOK_WATCHDOG_ENABLED;
+    else process.env.AUTHNET_WEBHOOK_WATCHDOG_ENABLED = priorEnabled;
   }
 });
 

@@ -12,6 +12,11 @@ const {
   processBProfileUpdatedWebhook,
   runBValidationFallback
 } = require('./paymentUpdateBRecovery');
+const {
+  publicWatchdogState,
+  runWebhookWatchdogOnce,
+  startWebhookWatchdogAutomation
+} = require('./watchdog');
 
 const WEBHOOK_LOG_SHEET_NAME = 'AuthNet_Webhook_Log';
 const RECEIVER_VERSION = 'authnet-webhook-log-b-catchup-v5-auto-charge';
@@ -253,6 +258,10 @@ function createAuthNetWebhookRouter(options = {}) {
   router.get('/health', (req, res) => {
     const bDetectionEnabled = isBDetectionEnabled();
     const bChargeEnabled = isBChargeEnabled();
+    const webhookWatchdog = publicWatchdogState();
+    const authnetMutations = [];
+    if (webhookWatchdog.enabled) authnetMutations.push('Existing webhook status auto-reactivation');
+    if (bChargeEnabled) authnetMutations.push('B profile-updated catch-up charge');
     res.json({
       ok: true,
       route: '/authnet/webhook',
@@ -267,8 +276,9 @@ function createAuthNetWebhookRouter(options = {}) {
         : (bDetectionEnabled
             ? [WEBHOOK_LOG_SHEET_NAME, 'Payment Update B pending-approval/suppression rows']
             : [WEBHOOK_LOG_SHEET_NAME]),
-      authnetMutations: bChargeEnabled ? ['B profile-updated catch-up charge'] : false,
+      authnetMutations: authnetMutations.length ? authnetMutations : false,
       customerEmails: false,
+      webhookWatchdog,
       bFallbackAutomation: {
         enabled: isBFallbackAutomationEnabled(),
         started: fallbackAutomationState.started,
@@ -284,6 +294,26 @@ function createAuthNetWebhookRouter(options = {}) {
         lastCounts: fallbackAutomationState.lastCounts
       }
     });
+  });
+
+  router.get('/webhook/watchdog/health', (req, res) => {
+    res.json({
+      ok: true,
+      route: '/authnet/webhook/watchdog',
+      authRequiredForManualRun: true,
+      authConfigured: Boolean(process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN),
+      authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
+      watchdog: publicWatchdogState()
+    });
+  });
+
+  router.post('/webhook/watchdog/run', async (req, res) => {
+    if (!hasValidSyncToken(req)) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized Auth.Net webhook watchdog request' });
+    }
+    const result = await runWebhookWatchdogOnce({ triggeredBy: String(req.body?.triggeredBy || req.query?.triggeredBy || 'api').slice(0, 80) });
+    res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+    return res.status(result.ok ? 200 : 500).json(result);
   });
 
   router.get('/b-catchup/fallback/health', (req, res) => {
@@ -452,7 +482,9 @@ function startAuthNetBFallbackAutomation({ initialDelayMs = 45000 } = {}) {
 
 module.exports = {
   startAuthNetBFallbackAutomation,
+  startWebhookWatchdogAutomation,
   runBFallbackAutomationOnce,
+  runWebhookWatchdogOnce,
   createAuthNetWebhookRouter,
   __authNetWebhookTestHooks: {
     WEBHOOK_LOG_HEADERS,
@@ -464,6 +496,8 @@ module.exports = {
     getWebhookSpreadsheetId,
     normalizeHexKey,
     safeEqualHex,
-    verifyAuthNetSignature
+    verifyAuthNetSignature,
+    publicWatchdogState,
+    runWebhookWatchdogOnce
   }
 };

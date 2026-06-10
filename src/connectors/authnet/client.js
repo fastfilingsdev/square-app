@@ -48,6 +48,7 @@ function getAuthNetConfig() {
     apiLoginId: process.env.AUTHNET_API_LOGIN_ID || '',
     transactionKey: process.env.AUTHNET_TRANSACTION_KEY || '',
     apiUrl: process.env.AUTHNET_API_URL || 'https://api2.authorize.net/xml/v1/request.api',
+    restUrl: process.env.AUTHNET_REST_URL || 'https://api.authorize.net/rest/v1',
     acceptEditPaymentUrl: process.env.AUTHNET_ACCEPT_EDIT_PAYMENT_URL || 'https://accept.authorize.net/customer/editPayment',
     acceptHostedPaymentUrl: process.env.AUTHNET_ACCEPT_HOSTED_PAYMENT_URL || 'https://accept.authorize.net/payment/payment'
   };
@@ -76,6 +77,38 @@ async function authNetPost(payload, config = getAuthNetConfig()) {
   }
 
   return data;
+}
+
+function authNetRestAuthHeader(config = getAuthNetConfig()) {
+  const authConfig = getMerchantAuthentication(config);
+  return `Basic ${Buffer.from(`${authConfig.name}:${authConfig.transactionKey}`, 'utf8').toString('base64')}`;
+}
+
+async function authNetRestRequest(method, path, body = null, config = getAuthNetConfig()) {
+  const baseUrl = String(config.restUrl || 'https://api.authorize.net/rest/v1').replace(/\/$/, '');
+  const response = await axios({
+    method,
+    url: `${baseUrl}${path}`,
+    data: body || undefined,
+    headers: {
+      Authorization: authNetRestAuthHeader(config),
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    timeout: 45000
+  });
+  return response.data || null;
+}
+
+async function getAuthNetWebhook(webhookId, config = getAuthNetConfig()) {
+  if (!webhookId) throw new Error('Missing Authorize.Net webhook ID');
+  return authNetRestRequest('GET', `/webhooks/${encodeURIComponent(String(webhookId))}`, null, config);
+}
+
+async function updateAuthNetWebhook(webhookId, patch, config = getAuthNetConfig()) {
+  if (!webhookId) throw new Error('Missing Authorize.Net webhook ID');
+  if (!patch || typeof patch !== 'object') throw new Error('Missing Authorize.Net webhook update patch');
+  return authNetRestRequest('PUT', `/webhooks/${encodeURIComponent(String(webhookId))}`, patch, config);
 }
 
 async function getSubscription(subscriptionId, config = getAuthNetConfig()) {
@@ -304,15 +337,19 @@ async function chargeCustomerPaymentProfile({
 
 module.exports = {
   authNetPost,
+  authNetRestAuthHeader,
+  authNetRestRequest,
   buildCustomerPaymentProfileChargeRequest,
   buildRefundTransactionRequest,
   chargeCustomerPaymentProfile,
   formatAuthNetErrorMessage,
   getAuthNetConfig,
+  getAuthNetWebhook,
   getHostedPaymentPageToken,
   getHostedProfilePageToken,
   getMerchantAuthentication,
   refundTransaction,
+  updateAuthNetWebhook,
   getSubscription,
   getTransactionDetails,
   getTransactionListForCustomer
