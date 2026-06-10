@@ -56,16 +56,35 @@ function parseRefundTransactionId(authNetResponse) {
   const tx = authNetResponse?.transactionResponse || authNetResponse?.createTransactionResponse?.transactionResponse || {};
   const responseCode = normalizeString(tx.responseCode);
   const transId = normalizeString(tx.transId || tx.transactionId);
-  const errors = Array.isArray(tx.errors?.error) ? tx.errors.error : [];
+  const errorValue = tx.errors?.error;
+  const errors = Array.isArray(errorValue) ? errorValue : (errorValue ? [errorValue] : []);
   if (errors.length) {
     throw new Error(errors.map(item => `${item.errorCode || ''} ${item.errorText || ''}`.trim()).join('; '));
   }
-  const messages = Array.isArray(tx.messages?.message) ? tx.messages.message : [];
+  const messageValue = tx.messages?.message;
+  const messages = Array.isArray(messageValue) ? messageValue : (messageValue ? [messageValue] : []);
   if (!transId || (responseCode && responseCode !== '1')) {
     const message = messages.map(item => `${item.code || ''} ${item.description || ''}`.trim()).filter(Boolean).join('; ');
     throw new Error(message || 'Authorize.Net refund did not return an approved transaction id');
   }
   return transId;
+}
+
+function safeSelectedSummary(selected = {}) {
+  return {
+    transactionId: selected.transactionId,
+    invoiceNumber: selected.invoiceNumber,
+    transactionDate: selected.transactionDate,
+    originalAmount: selected.originalAmount,
+    alreadyRefunded: selected.alreadyRefunded,
+    refundableAmount: selected.refundableAmount,
+    emailHash: selected.emailHash,
+    name: selected.name,
+    customerId: selected.customerId,
+    subscriptionId: selected.subscriptionId,
+    subscriptionStatus: selected.subscriptionStatus,
+    sourceRows: selected.sourceRows
+  };
 }
 
 async function processRefundLive({
@@ -151,25 +170,25 @@ async function processRefundLive({
       reason: normalizeString(reason),
       customerEmailSent: false,
       liveRefundsEnabled: true,
-      selected: {
-        transactionId: selected.transactionId,
-        invoiceNumber: selected.invoiceNumber,
-        transactionDate: selected.transactionDate,
-        originalAmount: selected.originalAmount,
-        alreadyRefunded: selected.alreadyRefunded,
-        refundableAmount: selected.refundableAmount,
-        emailHash: selected.emailHash,
-        name: selected.name,
-        customerId: selected.customerId,
-        subscriptionId: selected.subscriptionId,
-        subscriptionStatus: selected.subscriptionStatus,
-        sourceRows: selected.sourceRows
-      },
+      selected: safeSelectedSummary(selected),
       safety: 'Live Auth.Net refund processed with emailCustomer=false. No customer email sent, no charge/cancel/ARB/profile mutation, no raw card/bank/profile data returned, and no Returns operational edit.'
     };
   } catch (err) {
     releaseRecentRefund(key);
-    throw err;
+    return {
+      ok: false,
+      status: 'BLOCKED / ERROR',
+      liveRefundsEnabled: true,
+      issues: [`Authorize.Net refund failed: ${String(err.message || err).slice(0, 500)}`],
+      dryRun,
+      selected: safeSelectedSummary(selected),
+      refundAmount: dryRun.refundAmount,
+      originalTransactionId: selected.transactionId,
+      invoiceNumber: selected.invoiceNumber,
+      subscriptionId: selected.subscriptionId,
+      customerEmailSent: false,
+      safety: 'Authorize.Net refund was attempted but did not return an approved refund transaction. No customer email was sent, no charge/cancel/ARB/profile mutation was performed by this route, no raw card/bank/profile data returned, and no Returns operational edit was performed.'
+    };
   }
 }
 

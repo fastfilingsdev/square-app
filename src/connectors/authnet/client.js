@@ -1,5 +1,48 @@
 const axios = require('axios');
 
+function asArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function compactAuthNetMessage(item) {
+  if (!item || typeof item !== 'object') return '';
+  const code = item.code || item.errorCode || item.responseCode || '';
+  const text = item.text || item.errorText || item.description || item.message || '';
+  return `${code || ''} ${text || ''}`.trim();
+}
+
+function authNetErrorMessages(data) {
+  const messages = [];
+  asArray(data?.messages?.message).forEach(item => {
+    const text = compactAuthNetMessage(item);
+    if (text) messages.push(text);
+  });
+
+  const txResponses = [
+    data?.transactionResponse,
+    data?.createTransactionResponse?.transactionResponse
+  ].filter(Boolean);
+
+  txResponses.forEach(tx => {
+    asArray(tx?.errors?.error).forEach(item => {
+      const text = compactAuthNetMessage(item);
+      if (text) messages.push(text);
+    });
+    asArray(tx?.messages?.message).forEach(item => {
+      const text = compactAuthNetMessage(item);
+      if (text) messages.push(text);
+    });
+  });
+
+  return Array.from(new Set(messages));
+}
+
+function formatAuthNetErrorMessage(data) {
+  const messages = authNetErrorMessages(data);
+  return messages.length ? messages.join('; ') : 'Authorize.Net returned an error';
+}
+
 function getAuthNetConfig() {
   return {
     apiLoginId: process.env.AUTHNET_API_LOGIN_ID || '',
@@ -29,10 +72,7 @@ async function authNetPost(payload, config = getAuthNetConfig()) {
 
   const data = response.data || {};
   if (data.messages?.resultCode === 'Error') {
-    const message = Array.isArray(data.messages?.message)
-      ? data.messages.message.map(item => `${item.code || ''} ${item.text || ''}`.trim()).join('; ')
-      : 'Authorize.Net returned an error';
-    throw new Error(message);
+    throw new Error(formatAuthNetErrorMessage(data));
   }
 
   return data;
@@ -246,6 +286,7 @@ module.exports = {
   buildCustomerPaymentProfileChargeRequest,
   buildRefundTransactionRequest,
   chargeCustomerPaymentProfile,
+  formatAuthNetErrorMessage,
   getAuthNetConfig,
   getHostedPaymentPageToken,
   getHostedProfilePageToken,

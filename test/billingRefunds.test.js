@@ -14,7 +14,8 @@ const {
   __billingRefundProcessTestHooks
 } = require('../src/features/billingRefunds/refundProcess');
 const {
-  buildRefundTransactionRequest
+  buildRefundTransactionRequest,
+  formatAuthNetErrorMessage
 } = require('../src/connectors/authnet/client');
 
 function fakeSheets(ranges) {
@@ -180,6 +181,23 @@ test('Authorize.Net refund request uses original transaction, amount, last4, and
   assert.deepEqual(tx.transactionSettings.setting, [{ settingName: 'emailCustomer', settingValue: 'false' }]);
 });
 
+test('Authorize.Net refund errors preserve transactionResponse details behind E00027', () => {
+  const message = formatAuthNetErrorMessage({
+    transactionResponse: {
+      responseCode: '3',
+      errors: {
+        error: [{ errorCode: '54', errorText: 'The referenced transaction does not meet the criteria for issuing a credit.' }]
+      }
+    },
+    messages: {
+      resultCode: 'Error',
+      message: [{ code: 'E00027', text: 'The transaction was unsuccessful.' }]
+    }
+  });
+  assert.match(message, /E00027 The transaction was unsuccessful/);
+  assert.match(message, /54 The referenced transaction does not meet the criteria/);
+});
+
 test('live refund process remains blocked when live gate is disabled', async () => {
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   const result = await processRefundLive({
@@ -236,6 +254,38 @@ test('live refund process can execute only after gate and confirmation', async (
   assert.equal(refundRequest.emailCustomer, false);
   assert.equal(refundRequest.refTransId, '121662802867');
   assert.equal(refundRequest.amount, '10.00');
+  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+});
+
+test('live refund process returns structured blocked result when Auth.Net rejects refund', async () => {
+  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+  const result = await processRefundLive({
+    lookup: 'customer@example.test',
+    transactionId: '121662802867',
+    refundType: 'FULL',
+    reason: 'Duplicate Charge',
+    approvedBy: 'Gilmar Arellano',
+    liveConfirm: 'PROCESS LIVE REFUND',
+    sheets: fakeSheets({
+      Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
+      'New Orders': [['Email', 'Auth.Net Transaction ID'], ['customer@example.test', '121662802867']]
+    }),
+    subscriptionsSpreadsheetId: '',
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id }) }),
+    getSubscriptionFn: async () => { throw new Error('not expected'); },
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    refundTransactionFn: async () => {
+      throw new Error('E00027 The transaction was unsuccessful.; 54 The referenced transaction does not meet the criteria for issuing a credit.');
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'BLOCKED / ERROR');
+  assert.match(result.issues.join('; '), /E00027/);
+  assert.match(result.issues.join('; '), /referenced transaction/);
+  assert.equal(result.customerEmailSent, false);
+  assert.equal(result.originalTransactionId, '121662802867');
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
