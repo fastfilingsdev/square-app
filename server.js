@@ -8,6 +8,13 @@ const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/rout
 const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhookWatchdogAutomation } = require('./src/features/authnetWebhook/routes');
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
+const {
+  buildCloverAuthorizeUrl,
+  buildCloverTokenRequest,
+  getCloverOAuthConfig,
+  getCloverOAuthConfigStatus,
+  normalizeCloverTokenExpiration
+} = require('./src/features/clover/oauth');
 
 const app = express();
 app.use(express.json({
@@ -33,6 +40,7 @@ const GOOGLE_SHEETS_SPREADSHEET_ID = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY;
 const oauthStates = new Map();
+const cloverOAuthStates = new Map();
 
 function getSheetsAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -243,6 +251,261 @@ async function listCloverPayments({ merchantId, accessToken, baseUrl, start, end
   }
 
   return payments;
+}
+
+function getCloverOAuthRuntimeConfig(overrides = {}) {
+  return getCloverOAuthConfig(process.env, overrides);
+}
+
+async function exchangeCloverAuthorizationCode(code, overrides = {}) {
+  const config = getCloverOAuthRuntimeConfig(overrides);
+  const response = await axios.post(
+    `${config.apiBaseUrl}/oauth/v2/token`,
+    buildCloverTokenRequest({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      code
+    }),
+    {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+
+  return response.data;
+}
+
+async function ensurePlatformConnectionsSheet(sheets) {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const sheetTitle = 'Platform Connections';
+  const headers = [
+    'Platform',
+    'Customer ID',
+    'Merchant ID',
+    'Access Token',
+    'Refresh Token',
+    'Access Token Expiration',
+    'Refresh Token Expiration',
+    'Connected',
+    'Connected On',
+    'Environment'
+  ];
+
+  const spreadsheet = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties(sheetId,title,hidden)'
+  });
+
+  const existing = (spreadsheet.data.sheets || []).find(sheet => sheet.properties?.title === sheetTitle);
+  if (!existing) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: {
+                title: sheetTitle,
+                hidden: true,
+                gridProperties: {
+                  rowCount: 1000,
+                  columnCount: headers.length
+                }
+              }
+            }
+          }
+        ]
+      }
+    });
+  } else if (!existing.properties?.hidden && existing.properties?.sheetId !== undefined) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: {
+                sheetId: existing.properties.sheetId,
+                hidden: true
+              },
+              fields: 'hidden'
+            }
+          }
+        ]
+      }
+    });
+  }
+
+  const headerResponse = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetTitle}'!A1:J1`
+  }).catch(err => {
+    if (err.response?.status === 400 || err.code === 400) {
+      return { data: { values: [] } };
+    }
+    throw err;
+  });
+
+  const currentHeaders = headerResponse.data.values?.[0] || [];
+  const needsHeaderUpdate = headers.some((header, index) => String(currentHeaders[index] || '').trim() !== header);
+  if (needsHeaderUpdate) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetTitle}'!A1:J1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [headers]
+      }
+    });
+  }
+
+  return sheetTitle;
+}
+
+async function saveCloverConnection(sheets, connectionData) {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  const sheetTitle = await ensurePlatformConnectionsSheet(sheets);
+  const platform = 'clover';
+  const merchantId = String(connectionData.merchantId || '').trim();
+  const customerId = String(connectionData.customerId || '').trim();
+  const rowValues = [
+    platform,
+    customerId,
+    merchantId,
+    connectionData.accessToken || '',
+    connectionData.refreshToken || '',
+    normalizeCloverTokenExpiration(connectionData.accessTokenExpiration || ''),
+    normalizeCloverTokenExpiration(connectionData.refreshTokenExpiration || ''),
+    connectionData.connected ? 'TRUE' : 'FALSE',
+    connectionData.connectedOn || '',
+    connectionData.environment || 'Production'
+  ];
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetTitle}'!A:J`
+  });
+
+  const rows = response.data.values || [];
+  let existingRowNumber = null;
+
+  for (let i = 1; i < rows.length; i += 1) {
+    const row = rows[i] || [];
+    const existingPlatform = String(row[0] || '').trim().toLowerCase();
+    const existingCustomerId = String(row[1] || '').trim();
+    const existingMerchantId = String(row[2] || '').trim();
+
+    if (existingPlatform !== platform) {
+      continue;
+    }
+
+    if ((customerId && existingCustomerId === customerId) || (merchantId && existingMerchantId === merchantId)) {
+      existingRowNumber = i + 1;
+      break;
+    }
+  }
+
+  if (existingRowNumber) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetTitle}'!A${existingRowNumber}:J${existingRowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [rowValues]
+      }
+    });
+
+    return 'updated';
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `'${sheetTitle}'!A:J`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [rowValues]
+    }
+  });
+
+  return 'appended';
+}
+
+async function syncCustomerCloverMerchantId(sheets, customerId, cloverMerchantId) {
+  if (!customerId || !cloverMerchantId) {
+    return 'skipped';
+  }
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+    range: 'Customers!A:Z'
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length < 4) {
+    return 'skipped';
+  }
+
+  const headerRowIndex = 2;
+  const headers = (rows[headerRowIndex] || []).map(header => String(header || '').trim().toLowerCase());
+  const getIndex = (...names) => {
+    const match = names.find(name => headers.includes(name));
+    return match ? headers.indexOf(match) : -1;
+  };
+
+  const customerIdIndex = getIndex('customer id', 'internal customer id', 'id');
+  const cloverMerchantIdIndex = getIndex('clover merchant id', 'clover customer id', 'clover id', 'clover_merchant_id');
+  const cloverConnectedIndex = getIndex('clover connected', 'cloverconnected');
+  const lastSyncIndex = getIndex('last sync', 'lastsync');
+
+  if (customerIdIndex === -1 || cloverMerchantIdIndex === -1) {
+    return 'skipped';
+  }
+
+  for (let i = headerRowIndex + 1; i < rows.length; i += 1) {
+    const row = rows[i] || [];
+    const existingCustomerId = String(row[customerIdIndex] || '').trim();
+
+    if (existingCustomerId !== String(customerId).trim()) {
+      continue;
+    }
+
+    const rowNumber = i + 1;
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+      range: `Customers!${String.fromCharCode(65 + cloverMerchantIdIndex)}${rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[cloverMerchantId]]
+      }
+    });
+
+    if (cloverConnectedIndex > -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        range: `Customers!${String.fromCharCode(65 + cloverConnectedIndex)}${rowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [['Yes']]
+        }
+      });
+    }
+
+    if (lastSyncIndex > -1) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
+        range: `Customers!${String.fromCharCode(65 + lastSyncIndex)}${rowNumber}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [[new Date().toISOString().slice(0, 10)]]
+        }
+      });
+    }
+
+    return 'updated';
+  }
+
+  return 'not_found';
 }
 
 async function exchangeSquareAuthorizationCode(code) {
@@ -939,6 +1202,167 @@ app.get('/callback', async (req, res) => {
     `);
   } catch (err) {
     console.error('SQUARE TOKEN EXCHANGE ERROR:', err.response?.data || err.message);
+    return res.status(500).json(err.response?.data || { error: err.message });
+  }
+});
+
+app.get('/clover/connect', (req, res) => {
+  const { customer_id } = req.query;
+
+  if (!customer_id) {
+    return res.status(400).send('Missing customer_id. Use /clover/connect?customer_id=CUS-0001');
+  }
+
+  try {
+    const config = getCloverOAuthRuntimeConfig();
+    const state = crypto.randomBytes(24).toString('hex');
+    cloverOAuthStates.set(state, {
+      createdAt: Date.now(),
+      customerId: String(customer_id).trim()
+    });
+
+    const url = buildCloverAuthorizeUrl({
+      authBaseUrl: config.authBaseUrl,
+      clientId: config.clientId,
+      redirectUri: config.redirectUri,
+      state
+    });
+
+    console.log('CLOVER AUTH URL GENERATED FOR CUSTOMER:', customer_id);
+    return res.redirect(url);
+  } catch (err) {
+    console.error('CLOVER AUTH URL ERROR:', err.message);
+    return res.status(500).send(err.message);
+  }
+});
+
+app.get('/clover/health', (req, res) => {
+  const config = getCloverOAuthConfigStatus(process.env);
+  const sheetsConfigured = !!(
+    process.env.GOOGLE_SHEETS_SPREADSHEET_ID &&
+    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
+    process.env.GOOGLE_PRIVATE_KEY
+  );
+
+  return res.json({
+    ok: config.clientIdConfigured && config.clientSecretConfigured && config.redirectUriConfigured && sheetsConfigured,
+    authRequired: false,
+    environment: config.environment,
+    apiBaseUrl: config.apiBaseUrl,
+    authBaseUrl: config.authBaseUrl,
+    redirectUri: config.redirectUri || null,
+    clientIdConfigured: config.clientIdConfigured,
+    clientSecretConfigured: config.clientSecretConfigured,
+    sheetsConfigured,
+    tokenStorage: 'FF Billing spreadsheet tab: Platform Connections (hidden; one row per platform/customer/merchant)',
+    safety: 'No app secret, access token, refresh token, or raw customer/payment data is returned by this health route.'
+  });
+});
+
+app.get('/clover/callback', async (req, res) => {
+  const { code, state, error, error_description, merchant_id } = req.query;
+
+  if (error) {
+    console.log('CLOVER OAUTH ERROR:', error, error_description || '');
+    return res.status(400).send(`Clover error: ${error}${error_description ? ` - ${error_description}` : ''}`);
+  }
+
+  if (!state || !cloverOAuthStates.has(state)) {
+    return res.status(400).send('Invalid Clover OAuth state. Please try connecting again.');
+  }
+
+  const stateData = cloverOAuthStates.get(state);
+  cloverOAuthStates.delete(state);
+
+  if (!code) {
+    return res.status(400).send('Missing authorization code from Clover.');
+  }
+
+  try {
+    const config = getCloverOAuthRuntimeConfig();
+    const tokenData = await exchangeCloverAuthorizationCode(code, config);
+    const cloverMerchantId = String(
+      merchant_id ||
+      tokenData.merchant_id ||
+      tokenData.merchantId ||
+      ''
+    ).trim();
+
+    const sheets = await getSheetsClient();
+    const connectionAction = await saveCloverConnection(sheets, {
+      customerId: stateData?.customerId || '',
+      merchantId: cloverMerchantId,
+      accessToken: tokenData.access_token || '',
+      refreshToken: tokenData.refresh_token || '',
+      accessTokenExpiration: tokenData.access_token_expiration || '',
+      refreshTokenExpiration: tokenData.refresh_token_expiration || '',
+      connected: true,
+      connectedOn: new Date().toISOString(),
+      environment: config.environment
+    });
+    const customerSheetAction = await syncCustomerCloverMerchantId(
+      sheets,
+      stateData?.customerId || '',
+      cloverMerchantId
+    );
+
+    console.log('CLOVER TOKEN EXCHANGE SUCCESS:', {
+      customer_id: stateData?.customerId || null,
+      merchant_id: cloverMerchantId || null,
+      access_token_received: !!tokenData.access_token,
+      refresh_token_present: !!tokenData.refresh_token,
+      access_token_expiration: tokenData.access_token_expiration || null,
+      refresh_token_expiration: tokenData.refresh_token_expiration || null,
+      platform_connections_sheet_action: connectionAction,
+      customers_sheet_action: customerSheetAction
+    });
+
+    const successPayload = {
+      success: true,
+      message: 'Clover connected, authorization code exchanged, and connection saved successfully.',
+      customer_id: stateData?.customerId || null,
+      merchant_id: cloverMerchantId || null,
+      access_token_expiration: tokenData.access_token_expiration || null,
+      refresh_token_expiration: tokenData.refresh_token_expiration || null,
+      platform_connections_sheet_action: connectionAction,
+      customers_sheet_action: customerSheetAction
+    };
+
+    if (String(req.query.debug || '').toLowerCase() === 'true') {
+      return res.json(successPayload);
+    }
+
+    return res.status(200).send(`
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Clover Connected | Fast Filings</title>
+          <style>
+            body { margin: 0; min-height: 100vh; font-family: Arial, Helvetica, sans-serif; background: #f5f7fb; color: #14213d; display: flex; align-items: center; justify-content: center; padding: 24px; }
+            .card { max-width: 620px; background: #fff; border: 1px solid #d9e2f1; border-radius: 22px; box-shadow: 0 20px 60px rgba(20,33,61,0.12); padding: 36px; }
+            h1 { margin: 0 0 12px; font-size: 34px; }
+            p { font-size: 17px; line-height: 1.6; color: #5f6c86; }
+            .summary { margin-top: 24px; padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #d9e2f1; }
+            .label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #74819b; }
+            .value { margin-top: 6px; font-size: 16px; font-weight: 700; word-break: break-word; }
+          </style>
+        </head>
+        <body>
+          <main class="card">
+            <h1>Clover connected</h1>
+            <p>Thanks — your Clover account is connected to Fast Filings. You can close this window.</p>
+            <div class="summary">
+              <div class="label">Fast Filings Customer ID</div>
+              <div class="value">${stateData?.customerId || 'Connected'}</div>
+            </div>
+          </main>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('CLOVER TOKEN EXCHANGE ERROR:', err.response?.data || err.message);
     return res.status(500).json(err.response?.data || { error: err.message });
   }
 });
