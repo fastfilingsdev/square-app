@@ -8,6 +8,7 @@ const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/rout
 const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhookWatchdogAutomation } = require('./src/features/authnetWebhook/routes');
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
+const { createCloverHostedCheckoutRouter } = require('./src/features/cloverHostedCheckout/routes');
 const {
   buildCloverAuthorizeUrl,
   buildCloverTokenRequest,
@@ -19,7 +20,7 @@ const {
 const app = express();
 app.use(express.json({
   verify: (req, res, buf) => {
-    if (req.originalUrl && req.originalUrl.startsWith('/authnet/')) {
+    if (req.originalUrl && (req.originalUrl.startsWith('/authnet/') || req.originalUrl.startsWith('/clover/hosted-checkout/'))) {
       req.rawBody = buf.toString('utf8');
     }
   }
@@ -1370,6 +1371,7 @@ app.get('/clover/callback', async (req, res) => {
 app.use('/payment-update', createPaymentUpdateRouter());
 app.use('/subscriptions', createSubscriptionsRouter());
 app.use('/authnet', createAuthNetWebhookRouter());
+app.use('/clover', createCloverHostedCheckoutRouter());
 app.use('/billing', createBillingRefundsRouter());
 
 app.get('/', (req, res) => {
