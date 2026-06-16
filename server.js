@@ -16,6 +16,18 @@ const {
   getCloverOAuthConfigStatus,
   normalizeCloverTokenExpiration
 } = require('./src/features/clover/oauth');
+const {
+  buildCloverConnectUrl,
+  getCloverConnectLinkSecret,
+  getCloverConnectLinkStatus,
+  isCloverConnectSignatureRequired,
+  normalizeCustomerId,
+  verifyCloverConnectLink
+} = require('./src/features/clover/connectLinks');
+const {
+  getCloverTokenStorageStatus,
+  prepareCloverTokenForStorage
+} = require('./src/features/clover/tokenCrypto');
 
 const app = express();
 app.use(express.json({
@@ -42,6 +54,30 @@ const GOOGLE_SERVICE_ACCOUNT_EMAIL = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
 const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY;
 const oauthStates = new Map();
 const cloverOAuthStates = new Map();
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function hasValidAdminToken(req) {
+  const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
+  if (!expected) return false;
+  const headerToken = String(req.get('x-ff-sync-token') || req.get('x-authnet-sync-token') || '').trim();
+  const auth = String(req.get('authorization') || '').trim();
+  const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+  return headerToken === expected || bearer === expected;
+}
+
+function requireAdminToken(req, res) {
+  if (hasValidAdminToken(req)) return true;
+  res.status(401).json({ ok: false, error: 'Unauthorized request' });
+  return false;
+}
 
 function getSheetsAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -370,17 +406,20 @@ async function saveCloverConnection(sheets, connectionData) {
   const platform = 'clover';
   const merchantId = String(connectionData.merchantId || '').trim();
   const customerId = String(connectionData.customerId || '').trim();
+  const environment = connectionData.environment || 'Production';
+  const accessTokenForStorage = prepareCloverTokenForStorage(connectionData.accessToken || '', { environment });
+  const refreshTokenForStorage = prepareCloverTokenForStorage(connectionData.refreshToken || '', { environment });
   const rowValues = [
     platform,
     customerId,
     merchantId,
-    connectionData.accessToken || '',
-    connectionData.refreshToken || '',
+    accessTokenForStorage,
+    refreshTokenForStorage,
     normalizeCloverTokenExpiration(connectionData.accessTokenExpiration || ''),
     normalizeCloverTokenExpiration(connectionData.refreshTokenExpiration || ''),
     connectionData.connected ? 'TRUE' : 'FALSE',
     connectionData.connectedOn || '',
-    connectionData.environment || 'Production'
+    environment
   ];
 
   const response = await sheets.spreadsheets.values.get({
@@ -1216,10 +1255,36 @@ app.get('/clover/connect', (req, res) => {
 
   try {
     const config = getCloverOAuthRuntimeConfig();
+    const tokenStorageStatus = getCloverTokenStorageStatus(process.env, config.environment);
+    if (!tokenStorageStatus.productionReady) {
+      return res.status(503).send('Clover production token storage is not ready. Configure token encryption before connecting production merchants.');
+    }
+
+    const connectLinkStatus = getCloverConnectLinkStatus(process.env, config.environment);
+    if (!connectLinkStatus.productionReady) {
+      return res.status(503).send('Clover production connect links are not ready. Configure signed connect-link secret before connecting production merchants.');
+    }
+
+    let customerId;
+    if (isCloverConnectSignatureRequired(process.env, config.environment)) {
+      const verification = verifyCloverConnectLink({
+        customerId: customer_id,
+        expires: req.query.expires,
+        sig: req.query.sig,
+        secret: getCloverConnectLinkSecret(process.env)
+      });
+      if (!verification.ok) {
+        return res.status(400).send(`Invalid or expired Clover connect link: ${verification.error}`);
+      }
+      customerId = verification.customerId;
+    } else {
+      customerId = normalizeCustomerId(customer_id);
+    }
+
     const state = crypto.randomBytes(24).toString('hex');
     cloverOAuthStates.set(state, {
       createdAt: Date.now(),
-      customerId: String(customer_id).trim()
+      customerId
     });
 
     const url = buildCloverAuthorizeUrl({
@@ -1229,7 +1294,7 @@ app.get('/clover/connect', (req, res) => {
       state
     });
 
-    console.log('CLOVER AUTH URL GENERATED FOR CUSTOMER:', customer_id);
+    console.log('CLOVER AUTH URL GENERATED FOR CUSTOMER:', customerId);
     return res.redirect(url);
   } catch (err) {
     console.error('CLOVER AUTH URL ERROR:', err.message);
@@ -1237,8 +1302,46 @@ app.get('/clover/connect', (req, res) => {
   }
 });
 
+app.get('/clover/connect-link', (req, res) => {
+  if (!requireAdminToken(req, res)) return;
+
+  try {
+    const config = getCloverOAuthRuntimeConfig();
+    const connectLinkStatus = getCloverConnectLinkStatus(process.env, config.environment);
+    if (!connectLinkStatus.secretConfigured) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Missing CLOVER_CONNECT_LINK_SECRET / PLATFORM_CONNECT_LINK_SECRET'
+      });
+    }
+
+    const customerId = normalizeCustomerId(req.query.customer_id);
+    const ttlSeconds = Math.min(Math.max(Number(req.query.ttl_seconds || 7 * 24 * 60 * 60), 60), 30 * 24 * 60 * 60);
+    const baseUrl = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get('host')}`;
+    const url = buildCloverConnectUrl({
+      baseUrl,
+      customerId,
+      ttlSeconds,
+      secret: getCloverConnectLinkSecret(process.env)
+    });
+
+    return res.json({
+      ok: true,
+      environment: config.environment,
+      customer_id: customerId,
+      expires_in_seconds: ttlSeconds,
+      url,
+      safety: 'Signed Clover connect link only. Does not expose app secret, tokens, or customer payment data.'
+    });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/clover/health', (req, res) => {
   const config = getCloverOAuthConfigStatus(process.env);
+  const tokenStorage = getCloverTokenStorageStatus(process.env, config.environment);
+  const connectLinks = getCloverConnectLinkStatus(process.env, config.environment);
   const sheetsConfigured = !!(
     process.env.GOOGLE_SHEETS_SPREADSHEET_ID &&
     process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
@@ -1246,7 +1349,7 @@ app.get('/clover/health', (req, res) => {
   );
 
   return res.json({
-    ok: config.clientIdConfigured && config.clientSecretConfigured && config.redirectUriConfigured && sheetsConfigured,
+    ok: config.clientIdConfigured && config.clientSecretConfigured && config.redirectUriConfigured && sheetsConfigured && tokenStorage.productionReady && connectLinks.productionReady,
     authRequired: false,
     environment: config.environment,
     apiBaseUrl: config.apiBaseUrl,
@@ -1255,7 +1358,9 @@ app.get('/clover/health', (req, res) => {
     clientIdConfigured: config.clientIdConfigured,
     clientSecretConfigured: config.clientSecretConfigured,
     sheetsConfigured,
-    tokenStorage: 'FF Billing spreadsheet tab: Platform Connections (hidden; one row per platform/customer/merchant)',
+    tokenStorage,
+    connectLinks,
+    paymentsRouteAuthRequired: true,
     safety: 'No app secret, access token, refresh token, or raw customer/payment data is returned by this health route.'
   });
 });
@@ -1356,7 +1461,7 @@ app.get('/clover/callback', async (req, res) => {
             <p>Thanks — your Clover account is connected to Fast Filings. You can close this window.</p>
             <div class="summary">
               <div class="label">Fast Filings Customer ID</div>
-              <div class="value">${stateData?.customerId || 'Connected'}</div>
+              <div class="value">${escapeHtml(stateData?.customerId || 'Connected')}</div>
             </div>
           </main>
         </body>
@@ -2767,11 +2872,19 @@ app.listen(PORT, () => {
 });
 
 app.get('/clover-payments', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
+
   try {
+    if (req.query.access_token) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Passing Clover access_token in the query string is disabled. Use configured/stored credentials only.'
+      });
+    }
+
     const { start, end } = resolveDateRange(req.query);
     const cloverConfig = getCloverConfig({
       merchantId: req.query.merchant_id,
-      accessToken: req.query.access_token,
       baseUrl: req.query.base_url
     });
 
