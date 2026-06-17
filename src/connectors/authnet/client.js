@@ -162,9 +162,10 @@ function buildRefundTransactionRequest({
   const profileRefund = Boolean(customerProfileId && customerPaymentProfileId);
   if (!profileRefund && last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
   // Linked Authorize.Net refunds require the original transaction plus the
-  // original payment's masked card number. Transaction detail returns this as
-  // XXXX1234; preserve that request shape instead of sending bare last4.
-  const maskedCardNumber = `XXXX${last4}`;
+  // original payment card's last four digits with expirationDate=XXXX. Keep
+  // the request aligned with Authorize.Net's refundTransaction examples; do
+  // not send a current ARB payment profile unless no original last4 exists.
+  const refundCardNumber = last4;
   const paymentOrProfile = profileRefund ? {
     profile: {
       customerProfileId: String(customerProfileId),
@@ -175,7 +176,7 @@ function buildRefundTransactionRequest({
   } : {
     payment: {
       creditCard: {
-        cardNumber: maskedCardNumber,
+        cardNumber: refundCardNumber,
         expirationDate: 'XXXX'
       }
     }
