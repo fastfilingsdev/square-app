@@ -81,6 +81,53 @@ test('sheet refund ledger reduces refundable balance', () => {
   assert.equal(candidate.refundableAmount, '20.00');
 });
 
+test('lookup scans settled Auth.Net refund credits when sheet ledger is missing prior refund', async () => {
+  const sheets = fakeSheets({
+    Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
+    'New Orders': [['Email', 'Auth.Net Transaction ID', 'Order / Invoice #'], ['customer@example.test', '121657719835', '1467492646']]
+  });
+  const result = await lookupRefundCandidates({
+    lookup: 'customer@example.test',
+    sheets,
+    subscriptionsSpreadsheetId: '',
+    getTransactionDetailsFn: async id => {
+      if (String(id) === '121662802867') {
+        return { transaction: settledTx({
+          transId: '121662802867',
+          transactionType: 'refundTransaction',
+          transactionStatus: 'refundSettledSuccessfully',
+          settleAmount: '20.00',
+          refTransId: '121657719835',
+          order: { invoiceNumber: '1467492646' }
+        }) };
+      }
+      return { transaction: settledTx({
+        transId: '121657719835',
+        settleAmount: '20.00',
+        order: { invoiceNumber: '1467492646' }
+      }) };
+    },
+    getSubscriptionFn: async () => { throw new Error('not expected'); },
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    getSettledBatchListFn: async () => ({ batchList: [{ batchId: 'batch-1' }] }),
+    getTransactionListForBatchFn: async () => ({ transactions: [{
+      transId: '121662802867',
+      transactionType: 'refundTransaction',
+      transactionStatus: 'refundSettledSuccessfully',
+      settleAmount: '20.00',
+      refTransId: '121657719835',
+      order: { invoiceNumber: '1467492646' }
+    }] })
+  });
+  assert.equal(result.ok, true);
+  const original = result.candidates.find(item => item.transactionId === '121657719835');
+  assert.equal(original.alreadyRefunded, '20.00');
+  assert.equal(original.refundableAmount, '0.00');
+  assert.equal(original.refundable, false);
+  assert.match(original.blockReason, /no refundable balance remains/);
+  assert.equal(original.discoveredRefundCredits[0].transactionId, '121662802867');
+});
+
 test('lookup by email uses sheet references to fetch transaction details', async () => {
   const sheets = fakeSheets({
     Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
@@ -142,7 +189,7 @@ test('dry-run validates full and partial refund amounts without live processing'
   assert.equal(result.ok, true);
   assert.equal(result.status, 'DRY-RUN OK');
   assert.equal(result.refundAmount, '10.00');
-  assert.equal(result.liveRefundsEnabled, false);
+  assert.equal(result.liveRefundsEnabled, true);
 });
 
 test('dry-run blocks partial refund greater than refundable balance', async () => {
@@ -274,8 +321,8 @@ test('Authorize.Net failure sanitizer keeps nested transaction errors without se
   assert.equal(JSON.stringify(failure).includes('SECRET'), false);
 });
 
-test('live refund process remains blocked when live gate is disabled', async () => {
-  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+test('live refund process remains blocked when emergency disable is active', async () => {
+  process.env.FF_BILLING_REFUNDS_DISABLED = 'true';
   const result = await processRefundLive({
     lookup: 'customer@example.test',
     transactionId: '121662802867',
@@ -295,11 +342,11 @@ test('live refund process remains blocked when live gate is disabled', async () 
   });
   assert.equal(result.ok, false);
   assert.equal(result.status, 'LIVE REFUND DISABLED');
-  assert.match(result.issues.join('; '), /live refund gate is disabled/);
+  assert.match(result.issues.join('; '), /emergency disable is active/);
 });
 
-test('live refund process can execute only after gate and confirmation', async () => {
-  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+test('live refund process can execute after row safeguards and confirmation', async () => {
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
   let refundRequest;
   const result = await processRefundLive({
@@ -330,12 +377,12 @@ test('live refund process can execute only after gate and confirmation', async (
   assert.equal(refundRequest.emailCustomer, false);
   assert.equal(refundRequest.refTransId, '121662802867');
   assert.equal(refundRequest.amount, '10.00');
-  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 
 test('live refund process prefers original transaction card last4 over current subscription payment profile', async () => {
-  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
   let refundRequest;
   const result = await processRefundLive({
@@ -384,12 +431,12 @@ test('live refund process prefers original transaction card last4 over current s
   assert.equal(JSON.stringify(result).includes('40338125'), false);
   assert.equal(JSON.stringify(result).includes('1000177237'), false);
   assert.equal(JSON.stringify(result).includes('123 Main St'), false);
-  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 
 test('live refund process returns structured blocked result when Auth.Net rejects refund', async () => {
-  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
   const result = await processRefundLive({
     lookup: 'customer@example.test',
@@ -416,12 +463,12 @@ test('live refund process returns structured blocked result when Auth.Net reject
   assert.match(result.issues.join('; '), /referenced transaction/);
   assert.equal(result.customerEmailSent, false);
   assert.equal(result.originalTransactionId, '121662802867');
-  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 
 test('live refund process exposes sanitized Auth.Net transactionResponse detail when available', async () => {
-  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
   const result = await processRefundLive({
     lookup: 'customer@example.test',
@@ -460,7 +507,7 @@ test('live refund process exposes sanitized Auth.Net transactionResponse detail 
   assert.match(result.issues.join('; '), /33 Country cannot be left blank/);
   assert.equal(result.authNetFailure.transactionResponse.accountNumberMasked, 'XXXX1111');
   assert.equal(JSON.stringify(result).includes('SECRET'), false);
-  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  delete process.env.FF_BILLING_REFUNDS_DISABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
 

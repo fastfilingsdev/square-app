@@ -1,8 +1,10 @@
 const crypto = require('crypto');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
+  getSettledBatchList,
   getSubscription,
   getTransactionDetails,
+  getTransactionListForBatch,
   getTransactionListForCustomer
 } = require('../../connectors/authnet/client');
 
@@ -252,6 +254,10 @@ function transactionType(tx) {
   return normalizeString(tx?.transactionType || tx?.type);
 }
 
+function transactionRefTransId(tx) {
+  return normalizeString(tx?.refTransId || tx?.refTransID || tx?.refTransactionId || tx?.originalTransactionId);
+}
+
 function transactionAmount(tx) {
   return parseAmount(tx?.settleAmount ?? tx?.authAmount ?? tx?.authorizeAmount ?? tx?.amount);
 }
@@ -262,6 +268,22 @@ function transactionEmail(tx) {
 
 function transactionSubmitTime(tx) {
   return normalizeString(tx?.submitTimeUTC || tx?.submitTimeLocal || tx?.settleTimeUTC || tx?.createdAt);
+}
+
+function parseDate(value) {
+  const text = normalizeString(value);
+  if (!text) return null;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isoSeconds(date) {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function refundCreditScanDays() {
+  const raw = Number(process.env.FF_BILLING_REFUND_CREDIT_SCAN_DAYS || 45);
+  return Math.max(1, Math.min(Number.isFinite(raw) ? raw : 45, 180));
 }
 
 function transactionSubscriptionId(tx) {
@@ -406,12 +428,13 @@ function subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById 
   return anySubRef ? anySubRef.subscriptionStatus : '';
 }
 
-function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [], subscriptionStatusById = new Map(), refundProfileBySubscriptionId = new Map() } = {}) {
+function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, source = '', matchedRefs = [], subscriptionStatusById = new Map(), refundProfileBySubscriptionId = new Map(), refundCreditsByOriginalId = new Map() } = {}) {
   const id = transactionId(tx);
   const originalAmount = amountNumber(transactionAmount(tx));
   const authNetRefunded = authNetRefundTotal(tx);
   const sheetRefunded = sheetRefundTotal(tables, id);
-  const alreadyRefunded = Math.max(authNetRefunded, sheetRefunded);
+  const discoveredRefund = Number(refundCreditsByOriginalId.get(id)?.total || 0);
+  const alreadyRefunded = Math.max(authNetRefunded, sheetRefunded, discoveredRefund);
   const refundableAmount = Math.max(0, originalAmount - alreadyRefunded);
   const last4 = cardLast4(tx);
   const settled = isSettledForRefund(tx);
@@ -449,6 +472,7 @@ function sanitizeDetailForCandidate(tx, { tables = [], candidateNumber = 0, sour
     subscriptionStatus: subscriptionStatusForCandidate(tx, matchedRefs, subscriptionStatusById),
     cardLast4: last4,
     refundProfileAvailable: Boolean(subscriptionId && refundProfileBySubscriptionId.has(subscriptionId)),
+    discoveredRefundCredits: (refundCreditsByOriginalId.get(id)?.credits || []).slice(0, 10),
     source,
     sourceRows: matchedRefs.slice(0, 10).map(ref => ({ workbook: ref.workbook, tab: ref.tab, rowNumber: ref.rowNumber }))
   };
@@ -522,6 +546,105 @@ async function safeGetCustomerTransactions(customerProfileId, getTransactionList
   }
 }
 
+async function safeGetSettledBatchesForRefundScan({ originalTx, getSettledBatchListFn, notes }) {
+  if (!getSettledBatchListFn) return [];
+  const now = new Date();
+  const maxStart = new Date(now.getTime() - refundCreditScanDays() * 24 * 60 * 60 * 1000);
+  const txDate = parseDate(transactionSubmitTime(originalTx));
+  const start = txDate && txDate > maxStart ? txDate : maxStart;
+  try {
+    const data = await getSettledBatchListFn({
+      includeStatistics: false,
+      firstSettlementDate: isoSeconds(start),
+      lastSettlementDate: isoSeconds(now)
+    });
+    const rows = data?.batchList || data?.batches || [];
+    return Array.isArray(rows) ? rows : (rows ? [rows] : []);
+  } catch (err) {
+    notes.push(`Refund credit scan skipped/error: ${String(err.message || err).slice(0, 220)}`);
+    return [];
+  }
+}
+
+async function safeGetBatchTransactionsForRefundScan(batchId, getTransactionListForBatchFn, notes) {
+  if (!batchId || !getTransactionListForBatchFn) return [];
+  const all = [];
+  let offset = 1;
+  const limit = 1000;
+  try {
+    while (offset <= 5000) {
+      const data = await getTransactionListForBatchFn(batchId, { limit, offset });
+      const rows = data?.transactions || data?.transactionList || [];
+      const batchRows = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+      all.push(...batchRows);
+      if (batchRows.length < limit) break;
+      offset += limit;
+    }
+  } catch (err) {
+    notes.push(`Could not scan settled batch ${batchId}: ${String(err.message || err).slice(0, 220)}`);
+  }
+  return all;
+}
+
+function refundCreditLikelyMatchesOriginal(listTx, originalTx) {
+  const typeStatus = `${transactionType(listTx)} ${transactionStatus(listTx)}`.toLowerCase();
+  if (!/refund|credit/.test(typeStatus)) return false;
+  const originalId = transactionId(originalTx);
+  if (transactionRefTransId(listTx) && transactionRefTransId(listTx) === originalId) return true;
+  const originalInvoice = transactionInvoice(originalTx);
+  if (originalInvoice && transactionInvoice(listTx) === originalInvoice) return true;
+  const originalEmail = transactionEmail(originalTx);
+  if (originalEmail && transactionEmail(listTx) === originalEmail && amountNumber(transactionAmount(listTx)) > 0) return true;
+  return false;
+}
+
+function refundCreditMatchesOriginal(detailTx, originalTx) {
+  const typeStatus = `${transactionType(detailTx)} ${transactionStatus(detailTx)}`.toLowerCase();
+  if (!/refund|credit/.test(typeStatus)) return false;
+  const originalId = transactionId(originalTx);
+  if (transactionRefTransId(detailTx) === originalId) return true;
+  const originalInvoice = transactionInvoice(originalTx);
+  if (originalInvoice && transactionInvoice(detailTx) === originalInvoice) return true;
+  return false;
+}
+
+async function findRefundCreditsForOriginalTransaction(originalTx, {
+  getSettledBatchListFn,
+  getTransactionListForBatchFn,
+  getTransactionDetailsFn,
+  notes
+} = {}) {
+  const originalId = transactionId(originalTx);
+  if (!originalId) return { total: 0, credits: [] };
+  const batches = await safeGetSettledBatchesForRefundScan({ originalTx, getSettledBatchListFn, notes });
+  const creditsById = new Map();
+  for (const batch of batches) {
+    const batchId = normalizeString(batch?.batchId || batch?.id);
+    if (!batchId) continue;
+    const txRows = await safeGetBatchTransactionsForRefundScan(batchId, getTransactionListForBatchFn, notes);
+    const likelyRefundRows = txRows.filter(tx => refundCreditLikelyMatchesOriginal(tx, originalTx));
+    for (const row of likelyRefundRows.slice(0, 25)) {
+      const refundId = transactionId(row);
+      if (!refundId || creditsById.has(refundId)) continue;
+      const detail = await safeGetTransactionDetail(refundId, getTransactionDetailsFn, notes) || row;
+      if (!refundCreditMatchesOriginal(detail, originalTx)) continue;
+      const amount = amountNumber(transactionAmount(detail) || transactionAmount(row));
+      if (amount <= 0) continue;
+      creditsById.set(refundId, {
+        transactionId: refundId,
+        refTransId: transactionRefTransId(detail) || transactionRefTransId(row) || originalId,
+        invoiceNumber: transactionInvoice(detail) || transactionInvoice(row),
+        amount: money(amount),
+        status: transactionStatus(detail) || transactionStatus(row),
+        transactionDate: transactionSubmitTime(detail) || transactionSubmitTime(row)
+      });
+    }
+  }
+  const credits = Array.from(creditsById.values());
+  const total = credits.reduce((sum, credit) => sum + amountNumber(credit.amount), 0);
+  return { total: Number(total.toFixed(2)), credits };
+}
+
 function refsForTransaction(refs, tx) {
   const id = transactionId(tx);
   const invoice = transactionInvoice(tx);
@@ -542,6 +665,8 @@ async function lookupRefundCandidates({
   subscriptionsSpreadsheetId = FF_SUBSCRIPTIONS_SPREADSHEET_ID(),
   getTransactionDetailsFn = getTransactionDetails,
   getSubscriptionFn = getSubscription,
+  getSettledBatchListFn = getSettledBatchList,
+  getTransactionListForBatchFn = getTransactionListForBatch,
   getTransactionListForCustomerFn = getTransactionListForCustomer,
   maxDetails = 75
 } = {}) {
@@ -585,6 +710,20 @@ async function lookupRefundCandidates({
     if (tx) detailById.set(transactionId(tx) || txId, tx);
   }
 
+  const refundCreditsByOriginalId = new Map();
+  const originalTxsForCreditScan = Array.from(detailById.values())
+    .filter(tx => transactionId(tx) && isSettledForRefund(tx) && !isRefundOrVoidTransaction(tx))
+    .slice(0, 10);
+  for (const tx of originalTxsForCreditScan) {
+    const credits = await findRefundCreditsForOriginalTransaction(tx, {
+      getSettledBatchListFn,
+      getTransactionListForBatchFn,
+      getTransactionDetailsFn,
+      notes
+    });
+    if (credits.total > 0) refundCreditsByOriginalId.set(transactionId(tx), credits);
+  }
+
   const candidates = [];
   Array.from(detailById.values()).forEach(tx => {
     const id = transactionId(tx);
@@ -596,7 +735,8 @@ async function lookupRefundCandidates({
       source: matchedRefs.length ? 'sheet+authnet' : 'authnet',
       matchedRefs,
       subscriptionStatusById,
-      refundProfileBySubscriptionId
+      refundProfileBySubscriptionId,
+      refundCreditsByOriginalId
     });
     // Keep non-refundable matches in the response for safety/diagnosis, but sort refundable first below.
     candidates.push(candidate);
@@ -663,8 +803,8 @@ async function buildRefundDryRun({ lookup, transactionId: selectedTransactionId,
     reason: normalizeString(reason),
     customerEmailRequested: customerEmail === true,
     issues: validation.issues,
-    liveRefundsEnabled: false,
-    safety: 'Dry-run only. Live refund processing is not implemented/enabled in this build; no customer email is sent.'
+    liveRefundsEnabled: !/^(1|true|yes|disabled)$/i.test(normalizeString(process.env.FF_BILLING_REFUNDS_DISABLED)),
+    safety: 'Dry-run only. No Auth.Net refund was processed and no customer email was sent. Live processing still requires row status DRY-RUN OK, Approved By, Reason, typed confirmation, duplicate checks, and no emergency disable.'
   };
 }
 

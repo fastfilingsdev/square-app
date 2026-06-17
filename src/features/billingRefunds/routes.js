@@ -71,11 +71,12 @@ function createBillingRefundsRouter() {
       billingSpreadsheetConfigured: Boolean(FF_BILLING_SPREADSHEET_ID()),
       subscriptionsSpreadsheetConfigured: Boolean(FF_SUBSCRIPTIONS_SPREADSHEET_ID()),
       liveRefundsEnabled: liveRefundsEnabled(),
+      liveRefundEmergencyDisableEnv: 'FF_BILLING_REFUNDS_DISABLED',
       refundFailureReporting: 'structured-authnet-transaction-response-errors',
       refundCardNumberFormat: 'last4-with-expiration-XXXX',
-      liveRefundRequires: ['DRY-RUN OK', 'Approved By', 'Reason', 'typed confirmation', 'FF_BILLING_REFUNDS_LIVE_ENABLED=true'],
+      liveRefundRequires: ['DRY-RUN OK', 'Approved By', 'Reason', 'typed confirmation', 'not emergency-disabled'],
       customerEmailsSentByRefundRoute: false,
-      safety: 'Refund lookup/dry-run/live-process route protected by admin token or verified Google OAuth allowlist. Live Auth.Net refund execution is disabled unless the explicit live gate is enabled and the request passes final guards. Customer emails are never sent by this route.'
+      safety: 'Refund lookup/dry-run/live-process route protected by admin token or verified Google OAuth allowlist. Live Auth.Net refund execution requires sheet row safeguards, typed confirmation, duplicate locks, and no emergency disable. Customer emails are never sent by this route.'
     });
   });
 

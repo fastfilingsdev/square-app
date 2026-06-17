@@ -13,7 +13,7 @@ function normalizeString(value) {
 }
 
 function liveRefundsEnabled() {
-  return /^(1|true|yes|enabled)$/i.test(normalizeString(process.env.FF_BILLING_REFUNDS_LIVE_ENABLED));
+  return !/^(1|true|yes|disabled)$/i.test(normalizeString(process.env.FF_BILLING_REFUNDS_DISABLED));
 }
 
 function money(value) {
@@ -45,7 +45,7 @@ function releaseRecentRefund(key) {
 
 function requireLiveRefundApproval({ liveConfirm, approvedBy, reason }) {
   const issues = [];
-  if (!liveRefundsEnabled()) issues.push('live refund gate is disabled');
+  if (!liveRefundsEnabled()) issues.push('live refund emergency disable is active');
   if (normalizeString(liveConfirm) !== 'PROCESS LIVE REFUND') issues.push('missing live confirmation token');
   if (!normalizeString(approvedBy)) issues.push('Approved By is required');
   if (!normalizeString(reason)) issues.push('Reason is required');

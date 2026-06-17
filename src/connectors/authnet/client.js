@@ -232,6 +232,33 @@ async function getTransactionListForCustomer(customerProfileId, config = getAuth
   }, config);
 }
 
+async function getSettledBatchList({ firstSettlementDate, lastSettlementDate, includeStatistics = false } = {}, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  return authNetPost({
+    getSettledBatchListRequest: {
+      merchantAuthentication,
+      includeStatistics: Boolean(includeStatistics),
+      ...(firstSettlementDate ? { firstSettlementDate: String(firstSettlementDate) } : {}),
+      ...(lastSettlementDate ? { lastSettlementDate: String(lastSettlementDate) } : {})
+    }
+  }, config);
+}
+
+async function getTransactionListForBatch(batchId, { limit = 1000, offset = 1 } = {}, config = getAuthNetConfig()) {
+  const merchantAuthentication = getMerchantAuthentication(config);
+  return authNetPost({
+    getTransactionListRequest: {
+      merchantAuthentication,
+      batchId: String(batchId),
+      sorting: { orderBy: 'submitTimeUTC', orderDescending: true },
+      paging: {
+        limit: Math.max(1, Math.min(Number(limit) || 1000, 1000)),
+        offset: Math.max(1, Number(offset) || 1)
+      }
+    }
+  }, config);
+}
+
 function buildRefundTransactionRequest({
   refTransId,
   amount,
@@ -461,10 +488,12 @@ module.exports = {
   getHostedPaymentPageToken,
   getHostedProfilePageToken,
   getMerchantAuthentication,
+  getSettledBatchList,
   refundTransaction,
   sanitizeAuthNetFailureDetail,
   updateAuthNetWebhook,
   getSubscription,
   getTransactionDetails,
+  getTransactionListForBatch,
   getTransactionListForCustomer
 };
