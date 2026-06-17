@@ -87,6 +87,27 @@ function safeSelectedSummary(selected = {}) {
   };
 }
 
+function compactAuthNetFailureIssue(err) {
+  const failure = err?.authNetFailure;
+  const tx = failure?.transactionResponse;
+  if (!tx) return '';
+  const parts = [];
+  if (tx.responseCode) parts.push(`transactionResponse.responseCode=${tx.responseCode}`);
+  if (tx.transId) parts.push(`transactionResponse.transId=${tx.transId}`);
+  if (tx.refTransId) parts.push(`transactionResponse.refTransId=${tx.refTransId}`);
+  const errorText = (tx.errors || [])
+    .map(item => `${item.code || ''} ${item.text || ''}`.trim())
+    .filter(Boolean)
+    .join('; ');
+  const messageText = (tx.messages || [])
+    .map(item => `${item.code || ''} ${item.text || ''}`.trim())
+    .filter(Boolean)
+    .join('; ');
+  if (errorText) parts.push(`transactionResponse.errors=${errorText}`);
+  if (messageText) parts.push(`transactionResponse.messages=${messageText}`);
+  return parts.length ? `Authorize.Net detail: ${parts.join(', ')}` : '';
+}
+
 async function processRefundLive({
   lookup,
   transactionId,
@@ -186,13 +207,17 @@ async function processRefundLive({
     };
   } catch (err) {
     releaseRecentRefund(key);
+    const authNetFailureIssue = compactAuthNetFailureIssue(err);
+    const issues = [`Authorize.Net refund failed: ${String(err.message || err).slice(0, 500)}`];
+    if (authNetFailureIssue) issues.push(authNetFailureIssue.slice(0, 700));
     return {
       ok: false,
       status: 'BLOCKED / ERROR',
       liveRefundsEnabled: true,
-      issues: [`Authorize.Net refund failed: ${String(err.message || err).slice(0, 500)}`],
+      issues,
       dryRun,
       selected: safeSelectedSummary(selected),
+      ...(err?.authNetFailure ? { authNetFailure: err.authNetFailure } : {}),
       refundAmount: dryRun.refundAmount,
       originalTransactionId: selected.transactionId,
       invoiceNumber: selected.invoiceNumber,

@@ -5,6 +5,87 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+function normalizeString(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function safeText(value, max = 300) {
+  const text = normalizeString(value);
+  return text ? text.slice(0, max) : '';
+}
+
+function safeMessage(item) {
+  if (!item || typeof item !== 'object') return null;
+  const code = safeText(item.code || item.errorCode || item.responseCode, 80);
+  const text = safeText(item.text || item.errorText || item.description || item.message, 500);
+  if (!code && !text) return null;
+  return {
+    ...(code ? { code } : {}),
+    ...(text ? { text } : {})
+  };
+}
+
+function maskAccountNumber(value) {
+  const text = safeText(value, 80);
+  if (!text) return '';
+  const digits = text.replace(/\D/g, '');
+  if (digits.length >= 4) return `XXXX${digits.slice(-4)}`;
+  if (/^X+/i.test(text)) return text.slice(-12);
+  return 'MASKED';
+}
+
+function sanitizedMessages(value) {
+  return asArray(value).map(safeMessage).filter(Boolean);
+}
+
+function sanitizeTransactionResponse(tx) {
+  if (!tx || typeof tx !== 'object') return null;
+  const errors = sanitizedMessages(tx.errors?.error || tx.errors);
+  const messages = sanitizedMessages(tx.messages?.message || tx.messages);
+  const sanitized = {
+    responseCode: safeText(tx.responseCode, 40),
+    rawResponseCode: safeText(tx.rawResponseCode, 40),
+    transId: safeText(tx.transId || tx.transactionId, 80),
+    refTransId: safeText(tx.refTransID || tx.refTransId, 80),
+    accountType: safeText(tx.accountType, 80),
+    accountNumberMasked: maskAccountNumber(tx.accountNumber || tx.cardNumber),
+    avsResultCode: safeText(tx.avsResultCode || tx.AVSResponse, 40),
+    cvvResultCode: safeText(tx.cvvResultCode, 40),
+    cavvResultCode: safeText(tx.cavvResultCode, 40),
+    errors,
+    messages,
+    authCodePresent: Boolean(tx.authCode),
+    networkTransIdPresent: Boolean(tx.networkTransId),
+    fieldsPresent: Object.keys(tx).filter(key => ![
+      'authCode', 'transHash', 'transHashSha2', 'networkTransId', 'profile', 'userFields'
+    ].includes(key)).sort()
+  };
+  return Object.fromEntries(Object.entries(sanitized).filter(([, value]) => (
+    value !== '' && value != null && !(Array.isArray(value) && !value.length)
+  )));
+}
+
+function sanitizeAuthNetFailureDetail(data) {
+  if (!data || typeof data !== 'object') return null;
+  const tx = data.transactionResponse || data.createTransactionResponse?.transactionResponse || null;
+  const topMessages = sanitizedMessages(data.messages?.message || data.messages);
+  const transactionResponse = sanitizeTransactionResponse(tx);
+  return {
+    resultCode: safeText(data.messages?.resultCode || data.resultCode, 80),
+    messages: topMessages,
+    ...(transactionResponse ? { transactionResponse } : {}),
+    topLevelKeysPresent: Object.keys(data).filter(key => !['merchantAuthentication'].includes(key)).sort()
+  };
+}
+
+class AuthNetApiError extends Error {
+  constructor(message, data) {
+    super(message || 'Authorize.Net returned an error');
+    this.name = 'AuthNetApiError';
+    this.authNetFailure = sanitizeAuthNetFailureDetail(data);
+  }
+}
+
 function compactAuthNetMessage(item) {
   if (!item || typeof item !== 'object') return '';
   const code = item.code || item.errorCode || item.responseCode || '';
@@ -66,14 +147,23 @@ function getMerchantAuthentication(config = getAuthNetConfig()) {
 }
 
 async function authNetPost(payload, config = getAuthNetConfig()) {
-  const response = await axios.post(config.apiUrl, payload, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: 45000
-  });
+  let response;
+  try {
+    response = await axios.post(config.apiUrl, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 45000
+    });
+  } catch (err) {
+    const data = err?.response?.data;
+    if (data && typeof data === 'object') {
+      throw new AuthNetApiError(formatAuthNetErrorMessage(data), data);
+    }
+    throw err;
+  }
 
   const data = response.data || {};
   if (data.messages?.resultCode === 'Error') {
-    throw new Error(formatAuthNetErrorMessage(data));
+    throw new AuthNetApiError(formatAuthNetErrorMessage(data), data);
   }
 
   return data;
@@ -358,6 +448,7 @@ async function chargeCustomerPaymentProfile({
 }
 
 module.exports = {
+  AuthNetApiError,
   authNetPost,
   authNetRestAuthHeader,
   authNetRestRequest,
@@ -371,6 +462,7 @@ module.exports = {
   getHostedProfilePageToken,
   getMerchantAuthentication,
   refundTransaction,
+  sanitizeAuthNetFailureDetail,
   updateAuthNetWebhook,
   getSubscription,
   getTransactionDetails,

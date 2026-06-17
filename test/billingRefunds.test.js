@@ -14,8 +14,10 @@ const {
   __billingRefundProcessTestHooks
 } = require('../src/features/billingRefunds/refundProcess');
 const {
+  AuthNetApiError,
   buildRefundTransactionRequest,
-  formatAuthNetErrorMessage
+  formatAuthNetErrorMessage,
+  sanitizeAuthNetFailureDetail
 } = require('../src/connectors/authnet/client');
 
 function fakeSheets(ranges) {
@@ -245,6 +247,33 @@ test('Authorize.Net refund errors preserve transactionResponse details behind E0
   assert.match(message, /54 The referenced transaction does not meet the criteria/);
 });
 
+test('Authorize.Net failure sanitizer keeps nested transaction errors without sensitive raw fields', () => {
+  const failure = sanitizeAuthNetFailureDetail({
+    transactionResponse: {
+      responseCode: '3',
+      transId: '0',
+      refTransID: '121657719835',
+      accountNumber: 'XXXX0026',
+      accountType: 'MasterCard',
+      authCode: 'SECRET',
+      transHashSha2: 'SECRET_HASH',
+      errors: {
+        error: [{ errorCode: '33', errorText: 'Country cannot be left blank.' }]
+      }
+    },
+    messages: {
+      resultCode: 'Error',
+      message: [{ code: 'E00027', text: 'The transaction was unsuccessful.' }]
+    }
+  });
+  assert.equal(failure.resultCode, 'Error');
+  assert.equal(failure.transactionResponse.responseCode, '3');
+  assert.equal(failure.transactionResponse.refTransId, '121657719835');
+  assert.equal(failure.transactionResponse.accountNumberMasked, 'XXXX0026');
+  assert.deepEqual(failure.transactionResponse.errors, [{ code: '33', text: 'Country cannot be left blank.' }]);
+  assert.equal(JSON.stringify(failure).includes('SECRET'), false);
+});
+
 test('live refund process remains blocked when live gate is disabled', async () => {
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   const result = await processRefundLive({
@@ -387,6 +416,50 @@ test('live refund process returns structured blocked result when Auth.Net reject
   assert.match(result.issues.join('; '), /referenced transaction/);
   assert.equal(result.customerEmailSent, false);
   assert.equal(result.originalTransactionId, '121662802867');
+  delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+});
+
+test('live refund process exposes sanitized Auth.Net transactionResponse detail when available', async () => {
+  process.env.FF_BILLING_REFUNDS_LIVE_ENABLED = 'true';
+  __billingRefundProcessTestHooks.recentRefunds.clear();
+  const result = await processRefundLive({
+    lookup: 'customer@example.test',
+    transactionId: '121662802867',
+    refundType: 'FULL',
+    reason: 'Duplicate Charge',
+    approvedBy: 'Gilmar Arellano',
+    liveConfirm: 'PROCESS LIVE REFUND',
+    sheets: fakeSheets({
+      Refunds: [['Requested At', 'Lookup', 'Original Transaction ID']],
+      'New Orders': [['Email', 'Auth.Net Transaction ID'], ['customer@example.test', '121662802867']]
+    }),
+    subscriptionsSpreadsheetId: '',
+    getTransactionDetailsFn: async id => ({ transaction: settledTx({ transId: id }) }),
+    getSubscriptionFn: async () => { throw new Error('not expected'); },
+    getTransactionListForCustomerFn: async () => ({ transactions: [] }),
+    refundTransactionFn: async () => {
+      throw new AuthNetApiError('E00027 The transaction was unsuccessful.; 33 Country cannot be left blank.', {
+        transactionResponse: {
+          responseCode: '3',
+          transId: '0',
+          refTransID: '121662802867',
+          accountNumber: 'XXXX1111',
+          errors: { error: [{ errorCode: '33', errorText: 'Country cannot be left blank.' }] }
+        },
+        messages: {
+          resultCode: 'Error',
+          message: [{ code: 'E00027', text: 'The transaction was unsuccessful.' }]
+        }
+      });
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'BLOCKED / ERROR');
+  assert.match(result.issues.join('; '), /transactionResponse\.responseCode=3/);
+  assert.match(result.issues.join('; '), /33 Country cannot be left blank/);
+  assert.equal(result.authNetFailure.transactionResponse.accountNumberMasked, 'XXXX1111');
+  assert.equal(JSON.stringify(result).includes('SECRET'), false);
   delete process.env.FF_BILLING_REFUNDS_LIVE_ENABLED;
   __billingRefundProcessTestHooks.recentRefunds.clear();
 });
