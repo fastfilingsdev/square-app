@@ -69,6 +69,17 @@ function valueByHeader(sourceRow, headerNames) {
   return '';
 }
 
+function ticketIdFromPaymentUpdateLink(link) {
+  const match = String(link || '').match(/\/payment-update\/([^/?#]+)/);
+  return match ? match[1] : '';
+}
+
+function routeError(message, statusCode) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
 function safeAmount(value) {
   const raw = String(value == null ? '' : value).trim();
   if (!raw) return '';
@@ -471,10 +482,99 @@ async function loadSheetRowContext(sheets, spreadsheetId, tabName, rowNumber) {
   return out;
 }
 
+function paymentUpdateContextFromMappedRow(source) {
+  const out = {
+    amountDue: '',
+    amount: '',
+    customerId: '',
+    name: '',
+    billingZip: '',
+    email: '',
+    notes: ''
+  };
+  out.amountDue = firstNonEmpty(
+    valueByHeader(source, 'Amount Due'),
+    valueByHeader(source, 'Amount'),
+    valueByHeader(source, 'Amount to Collect')
+  );
+  out.amount = out.amountDue;
+  out.customerId = valueByHeader(source, ['Customer ID', 'Customer ID(s)']);
+  out.name = firstNonEmpty(valueByHeader(source, 'Name'), valueByHeader(source, 'Full Name'));
+  out.billingZip = firstNonEmpty(
+    valueByHeader(source, 'Billing Zip'),
+    valueByHeader(source, 'Billing ZIP'),
+    valueByHeader(source, 'Zip'),
+    valueByHeader(source, 'Postal Code')
+  );
+  out.email = firstNonEmpty(valueByHeader(source, 'Email'), valueByHeader(source, 'Alt Email'));
+  out.notes = firstNonEmpty(valueByHeader(source, 'Notes'), valueByHeader(source, 'Note'));
+  return out;
+}
+
+function mapSheetRow(headers, row) {
+  const source = {};
+  headers.forEach((header, i) => {
+    const key = normalizeHeader(header);
+    if (key) source[key] = String(row[i] || '').trim();
+  });
+  return source;
+}
+
+function paymentUpdateRowMatchesTicket(source, ticket) {
+  const expectedSubscriptionId = String(ticket.subscriptionId || '').trim();
+  const rowSubscriptionId = valueByHeader(source, 'Subscription ID');
+  if (!expectedSubscriptionId || rowSubscriptionId !== expectedSubscriptionId) return false;
+
+  const ticketIdFromLink = ticketIdFromPaymentUpdateLink(valueByHeader(source, 'Payment Update Link'));
+  if (ticketIdFromLink && ticketIdFromLink !== ticket.ticketId) return false;
+  return true;
+}
+
+async function loadPaymentUpdateRowContextForTicket(sheets, spreadsheetId, ticket) {
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'Payment Update'!A:AZ`,
+    valueRenderOption: 'FORMATTED_VALUE'
+  });
+  const rows = response.data.values || [];
+  if (!rows.length) {
+    throw routeError('Payment Update queue is empty; cannot verify this secure link', 500);
+  }
+
+  const headers = rows[0] || [];
+  const storedRowNumber = Number(ticket.paymentUpdateRow || 0);
+  if (Number.isInteger(storedRowNumber) && storedRowNumber >= 2 && rows[storedRowNumber - 1]) {
+    const source = mapSheetRow(headers, rows[storedRowNumber - 1] || []);
+    if (paymentUpdateRowMatchesTicket(source, ticket)) {
+      return paymentUpdateContextFromMappedRow(source);
+    }
+  }
+
+  const exactLinkMatches = [];
+  const subscriptionMatches = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    const source = mapSheetRow(headers, rows[i] || []);
+    const rowSubscriptionId = valueByHeader(source, 'Subscription ID');
+    if (rowSubscriptionId !== String(ticket.subscriptionId || '').trim()) continue;
+    subscriptionMatches.push(source);
+
+    const ticketIdFromLink = ticketIdFromPaymentUpdateLink(valueByHeader(source, 'Payment Update Link'));
+    if (ticketIdFromLink === ticket.ticketId) exactLinkMatches.push(source);
+  }
+
+  if (exactLinkMatches.length === 1) return paymentUpdateContextFromMappedRow(exactLinkMatches[0]);
+  if (exactLinkMatches.length > 1) {
+    throw routeError('Payment Update identity guard found duplicate rows for this secure link; please contact Fast Filings support', 409);
+  }
+  if (subscriptionMatches.length === 1) return paymentUpdateContextFromMappedRow(subscriptionMatches[0]);
+
+  throw routeError('Payment Update identity guard could not match this secure link to the current queue row', 409);
+}
+
 async function loadPaymentUpdateSourceContext(sheets, spreadsheetId, ticket) {
   const [sourceContext, paymentRowContext] = await Promise.all([
     loadSheetRowContext(sheets, spreadsheetId, ticket.sourceTab, ticket.sourceRow),
-    loadSheetRowContext(sheets, spreadsheetId, 'Payment Update', ticket.paymentUpdateRow)
+    loadPaymentUpdateRowContextForTicket(sheets, spreadsheetId, ticket)
   ]);
 
   return {
@@ -774,6 +874,7 @@ module.exports = {
     paymentUpdateSettings,
     paymentFlowForTicket,
     safeAmount,
-    displayAmount
+    displayAmount,
+    loadPaymentUpdateRowContextForTicket
   }
 };
