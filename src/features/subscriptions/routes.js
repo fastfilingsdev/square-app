@@ -66,6 +66,7 @@ function createSubscriptionsRouter() {
       onboardingSpreadsheetConfigured: Boolean(process.env.FF_ONBOARDING_SPREADSHEET_ID || process.env.ONBOARDING_SPREADSHEET_ID),
       arbLiveGateEnabled: isArbAutoCreateEnabled(),
       newOrdersAutoDiscoveryEnabled: isNewOrdersAutoDiscoveryEnabled(),
+      duplicateMembershipGuard: 'same-email-existing-active-or-created-membership-review',
       automation: {
         enabled: isNewOrdersAutomationEnabled(),
         started: automationState.started,
@@ -80,7 +81,7 @@ function createSubscriptionsRouter() {
         lastCounts: automationState.lastCounts,
         lastGuards: automationState.lastGuards
       },
-      safety: 'Targets FF - Billing / New Orders. Formstack owns row creation; connector enriches existing New Orders rows with Auth.Net evidence, blocks recurring ARB payments/declines/mismatches, creates ARBs only after verified original-charge evidence, then routes to Active Subscriptions and Onboarding. No customer emails, refunds, cancellations, card/bank data handling, or default Auth.Net row auto-discovery.'
+      safety: 'Targets FF - Billing / New Orders. Formstack owns row creation; connector enriches existing New Orders rows with Auth.Net evidence, blocks recurring ARB payments/declines/mismatches and same-email duplicate memberships, creates ARBs only after verified original-charge evidence, then routes to Active Subscriptions and Onboarding. No customer emails, refunds, cancellations, card/bank data handling, or default Auth.Net row auto-discovery.'
     });
   });
 

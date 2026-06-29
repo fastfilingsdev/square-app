@@ -280,6 +280,84 @@ test('duplicate successful New Orders rows are downgraded to no-action duplicate
   assert.match(plan.rowUpdates[0].fields['Review Status'], /73321684/);
 });
 
+test('same email with existing active membership is blocked for duplicate review before ARB creation', () => {
+  const rows = orderRows();
+  rows[1][1] = 'Duplicate Customer';
+  rows[1][2] = 'duplicate@example.test';
+  rows[1][4] = '29';
+  rows[1][5] = '9001000002';
+  rows[1][6] = '9002000002';
+
+  const plan = buildPlan({
+    newOrderRows: rows,
+    conversionRows: [['Source New Order Row', 'Auth.Net Transaction ID']],
+    activeRows: [[
+      'Time', 'Subscription ID', 'Customer ID', 'Name', 'Email', 'Alt Email', 'Amount', 'Onboarding Status', 'Notes', 'LTV', 'History'
+    ], [
+      '2026-07-18', '90030001', 'CUST-1', 'Duplicate Customer', 'duplicate@example.test', '', '29', '', '', '', ''
+    ]],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-20T20:00:00Z', records: [approvedTx({
+      transId: '9002000002',
+      authAmount: '29.00',
+      order: { invoiceNumber: '9001000002' },
+      submitTimeUTC: '2026-06-20T19:36:20Z',
+      customer: { email: 'duplicate@example.test' }
+    })], errors: [] },
+    now: '2026-06-20T20:00:00Z'
+  });
+
+  assert.equal(plan.conversionUpserts.length, 0);
+  assert.equal(plan.ready.length, 0);
+  assert.equal(plan.rowUpdates.length, 1);
+  assert.equal(plan.rowUpdates[0].fields['Payment Status'], 'Review — possible duplicate order');
+  assert.equal(plan.rowUpdates[0].fields['Route Target'], 'Duplicate / Review');
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /90030001/);
+  assert.match(plan.rowUpdates[0].fields['Review Status'], /CUST-1/);
+});
+
+test('same sync run blocks second same-email new order with different invoice and transaction', () => {
+  const headers = orderRows()[0];
+  const rows = [headers, [
+    'Jun 18, 2026 09:28:25', 'Duplicate Customer', 'duplicate@example.test', '', '29', '9001000001', '9002000001', '', '', '', '', '', '', ''
+  ], [
+    'Jun 20, 2026 15:36:20', 'Duplicate Customer', 'duplicate@example.test', '', '29', '9001000002', '9002000002', '', '', '', '', '', '', ''
+  ]];
+
+  const plan = buildPlan({
+    newOrderRows: rows,
+    conversionRows: [['Source New Order Row', 'Auth.Net Transaction ID']],
+    activeRows: [['Subscription ID']],
+    onboardingRows: [],
+    auth: { pulledAtUtc: '2026-06-20T20:00:00Z', records: [
+      approvedTx({
+        transId: '9002000001',
+        authAmount: '29.00',
+        order: { invoiceNumber: '9001000001' },
+        submitTimeUTC: '2026-06-18T13:28:25Z',
+        customer: { email: 'duplicate@example.test' }
+      }),
+      approvedTx({
+        transId: '9002000002',
+        authAmount: '29.00',
+        order: { invoiceNumber: '9001000002' },
+        submitTimeUTC: '2026-06-20T19:36:20Z',
+        customer: { email: 'duplicate@example.test' }
+      })
+    ], errors: [] },
+    now: '2026-06-20T20:00:00Z'
+  });
+
+  assert.equal(plan.conversionUpserts.length, 1);
+  assert.equal(plan.conversionUpserts[0].order.rowNumber, 2);
+  assert.equal(plan.ready.length, 1);
+  assert.equal(plan.rowUpdates.length, 2);
+  assert.equal(plan.rowUpdates[1].rowNumber, 3);
+  assert.equal(plan.rowUpdates[1].fields['Payment Status'], 'Review — possible duplicate order');
+  assert.match(plan.rowUpdates[1].fields['Review Status'], /current FF Billing New Orders sync plan/);
+  assert.match(plan.rowUpdates[1].fields['Review Status'], /row 2/);
+});
+
 test('existing ARB failed review rows are not retried automatically', () => {
   const rows = orderRows();
   rows[1][5] = '1467492646';

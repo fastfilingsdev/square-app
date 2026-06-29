@@ -710,6 +710,118 @@ function indexSuccessfulNewOrders(newOrders, conversionIndex) {
   return out;
 }
 
+function addMembershipCandidate(index, email, candidate) {
+  const key = normalizeEmail(email);
+  if (!key) return;
+  if (!index.has(key)) index.set(key, []);
+  index.get(key).push(candidate);
+}
+
+function firstDifferentMembershipCandidate(index, email, rowNumber = '') {
+  const key = normalizeEmail(email);
+  if (!key) return null;
+  const candidates = index.get(key) || [];
+  const currentRow = String(rowNumber || '');
+  return candidates.find(candidate => {
+    const source = normalizeString(candidate.source);
+    const sameNewOrdersRow = (
+      source === 'FF Billing / New Orders'
+      || source === 'current FF Billing New Orders sync plan'
+    ) && String(candidate.rowNumber || '') === currentRow;
+    const sameConversionSourceRow = String(candidate.sourceNewOrderRow || '') === currentRow;
+    return !sameNewOrdersRow && !sameConversionSourceRow;
+  }) || null;
+}
+
+function indexActiveMemberships(activeRows) {
+  const table = tableFromValues(activeRows || []);
+  const out = new Map();
+  table.rows.forEach(item => {
+    const email = normalizeEmail(getCell(item.row, item.map, 'Email'));
+    const subscriptionId = getCell(item.row, item.map, 'Subscription ID');
+    if (!email || !subscriptionId || subscriptionId.toUpperCase().startsWith('TEST')) return;
+    addMembershipCandidate(out, email, {
+      source: 'FF Subscriptions / Active Subscriptions',
+      rowNumber: item.rowNumber,
+      subscriptionId,
+      customerId: getCell(item.row, item.map, 'Customer ID'),
+      amount: displayAmount(getCell(item.row, item.map, 'Amount')),
+      name: getCell(item.row, item.map, 'Name')
+    });
+  });
+  return out;
+}
+
+function indexCreatedMembershipConversions(conversionIndex) {
+  const out = new Map();
+  (conversionIndex.rows || []).forEach(item => {
+    if (!conversionIsCreated(item)) return;
+    const email = normalizeEmail(getCell(item.row, item.map, 'Email'));
+    const subscriptionId = getCell(item.row, item.map, 'New Subscription ID');
+    if (!email || !subscriptionId || subscriptionId.toUpperCase().startsWith('TEST')) return;
+    addMembershipCandidate(out, email, {
+      source: 'FF Billing / Subscription Conversions',
+      rowNumber: item.rowNumber,
+      sourceNewOrderRow: conversionSourceRow(item),
+      subscriptionId,
+      customerId: getCell(item.row, item.map, 'Customer ID'),
+      amount: displayAmount(getCell(item.row, item.map, 'Amount')),
+      name: getCell(item.row, item.map, 'Name')
+    });
+  });
+  return out;
+}
+
+function indexSuccessfulNewOrderMemberships(newOrders, conversionIndex) {
+  const out = new Map();
+  newOrders.rows.forEach(order => {
+    const email = normalizeEmail(getCell(order.row, order.map, 'Email'));
+    if (!email) return;
+    const subCreated = isTruthy(getCell(order.row, order.map, 'Sub Created'));
+    const paymentStatus = getCell(order.row, order.map, 'Payment Status');
+    const subscriptionId = createdSubscriptionForOrder(order, conversionIndex);
+    if (!subCreated && !/^Subscription created$/i.test(paymentStatus) && !subscriptionId) return;
+    if (!subscriptionId && !subCreated && !/^Subscription created$/i.test(paymentStatus)) return;
+    addMembershipCandidate(out, email, {
+      source: 'FF Billing / New Orders',
+      rowNumber: order.rowNumber,
+      subscriptionId,
+      amount: displayAmount(getCell(order.row, order.map, 'Amount')),
+      name: getCell(order.row, order.map, 'Name')
+    });
+  });
+  return out;
+}
+
+function membershipDuplicateDescription(duplicate) {
+  if (!duplicate) return 'same email already has an existing membership record';
+  const parts = [];
+  if (duplicate.source) parts.push(duplicate.source);
+  if (duplicate.rowNumber) parts.push(`row ${duplicate.rowNumber}`);
+  if (duplicate.sourceNewOrderRow) parts.push(`source New Orders row ${duplicate.sourceNewOrderRow}`);
+  if (duplicate.customerId) parts.push(`Customer ${duplicate.customerId}`);
+  if (duplicate.subscriptionId) parts.push(`subscription ${duplicate.subscriptionId}`);
+  if (duplicate.amount) parts.push(`amount ${duplicate.amount}`);
+  return parts.length ? parts.join(' / ') : 'same email already has an existing membership record';
+}
+
+function possibleDuplicateMembershipUpdate(order, duplicate, auth, now) {
+  const description = membershipDuplicateDescription(duplicate);
+  const review = `Possible duplicate membership/order: same email already has ${description}; no ARB attempted. Review before creating another subscription.`;
+  const note = `Duplicate guard blocked ARB creation because same email already has ${description}.`;
+  return {
+    rowNumber: order.rowNumber,
+    fields: {
+      'Sub Created': '',
+      'Payment Status': 'Review — possible duplicate order',
+      'Route Target': 'Duplicate / Review',
+      'Review Status': review,
+      'Last AuthNet Check At': auth.pulledAtUtc || now,
+      'Connector Notes': appendNote(getCell(order.row, order.map, 'Connector Notes'), note)
+    }
+  };
+}
+
 function duplicateOrderUpdate(order, duplicate, auth, now) {
   const subscriptionText = duplicate.subscriptionId ? ` / subscription ${duplicate.subscriptionId}` : '';
   const review = `Duplicate of New Orders row ${duplicate.rowNumber}${subscriptionText}; no ARB attempted.`;
@@ -988,6 +1100,10 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
   const newOrders = tableFromValues(newOrderRows);
   const conversionIndex = indexConversions(conversionRows);
   const successfulOrderIndex = indexSuccessfulNewOrders(newOrders, conversionIndex);
+  const activeMembershipsByEmail = indexActiveMemberships(activeRows || []);
+  const createdConversionsByEmail = indexCreatedMembershipConversions(conversionIndex);
+  const successfulNewOrdersByEmail = indexSuccessfulNewOrderMemberships(newOrders, conversionIndex);
+  const pendingMembershipsByEmail = new Map();
   const activeIds = indexIds(activeRows, 'Subscription ID');
   const onboarding = indexOnboarding(onboardingRows || []);
 
@@ -1014,6 +1130,10 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
       skipped.push({ rowNumber: order.rowNumber, reason: 'Duplicate row already resolved' });
       return;
     }
+    if (/^Review\s+—\s+possible duplicate order/i.test(paymentStatus)) {
+      skipped.push({ rowNumber: order.rowNumber, reason: 'Possible duplicate order already in review' });
+      return;
+    }
     const duplicate = identityKey ? successfulOrderIndex.get(identityKey) : null;
     if (duplicate && duplicate.rowNumber !== order.rowNumber) {
       rowUpdates.push(duplicateOrderUpdate(order, duplicate, auth, now));
@@ -1030,6 +1150,21 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
     }
     if (!email && !amount && !existingTxId && !existingInvoice) {
       skipped.push({ rowNumber: order.rowNumber, reason: 'Blank/incomplete order row' });
+      return;
+    }
+
+    const possibleDuplicateMembership = firstDifferentMembershipCandidate(activeMembershipsByEmail, email, order.rowNumber)
+      || firstDifferentMembershipCandidate(createdConversionsByEmail, email, order.rowNumber)
+      || firstDifferentMembershipCandidate(successfulNewOrdersByEmail, email, order.rowNumber)
+      || firstDifferentMembershipCandidate(pendingMembershipsByEmail, email, order.rowNumber);
+    if (possibleDuplicateMembership) {
+      rowUpdates.push(possibleDuplicateMembershipUpdate(order, possibleDuplicateMembership, auth, now));
+      skipped.push({
+        rowNumber: order.rowNumber,
+        reason: 'Possible duplicate membership/order for same email',
+        matchedSource: membershipDuplicateDescription(possibleDuplicateMembership),
+        subscriptionId: possibleDuplicateMembership.subscriptionId || ''
+      });
       return;
     }
 
@@ -1102,6 +1237,13 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
       tx: match.tx,
       firstBillingDate,
       newSubscriptionId: getCell(existingConversion?.row || [], existingConversion?.map || headerMap([]), 'New Subscription ID')
+    });
+    addMembershipCandidate(pendingMembershipsByEmail, email, {
+      source: 'current FF Billing New Orders sync plan',
+      rowNumber: order.rowNumber,
+      subscriptionId: '',
+      amount: displayAmount(amount),
+      name: getCell(row, m, 'Name')
     });
     ready.push({ rowNumber: order.rowNumber, transaction: sanitizeTransaction(match.tx, match.source), firstBillingDate });
   });
