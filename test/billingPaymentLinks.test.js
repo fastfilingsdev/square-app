@@ -101,6 +101,10 @@ test('Authorize.Net transaction request includes line items, invoice, email, cus
   assert.equal(tx.billTo.firstName, 'Ada');
   assert.equal(tx.billTo.lastName, 'Lovelace');
   assert.equal(tx.billTo.company, 'Acme Supply LLC');
+  assert.ok(
+    Object.keys(tx).indexOf('customer') < Object.keys(tx).indexOf('billTo'),
+    'Authorize.Net schema requires customer before billTo'
+  );
   assert.equal(tx.lineItems.lineItem.length, 2);
   assert.equal(tx.lineItems.lineItem[1].quantity, '2');
   assert.equal(tx.lineItems.lineItem[1].unitPrice, '20.00');

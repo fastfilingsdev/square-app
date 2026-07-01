@@ -324,17 +324,20 @@ function buildHostedPaymentTransactionRequest(link) {
     amount,
     order: { invoiceNumber, description },
     lineItems: authNetLineItems(items),
+    // Authorize.Net's JSON API is mapped onto an XML schema where sibling
+    // order matters. Keep customer before billTo; putting customer after
+    // billTo triggers E00003 invalid child element errors on Accept Hosted.
+    ...(email || customerId ? {
+      customer: {
+        ...(customerId ? { id: customerId.slice(0, 20) } : {}),
+        ...(email ? { email: email.slice(0, 255) } : {})
+      }
+    } : {}),
     ...(firstName || lastName || link.rowObj['Business Name'] ? {
       billTo: {
         ...(firstName ? { firstName } : {}),
         ...(lastName ? { lastName } : {}),
         ...(link.rowObj['Business Name'] ? { company: normalizeString(link.rowObj['Business Name']).slice(0, 50) } : {})
-      }
-    } : {}),
-    ...(email || customerId ? {
-      customer: {
-        ...(customerId ? { id: customerId.slice(0, 20) } : {}),
-        ...(email ? { email: email.slice(0, 255) } : {})
       }
     } : {}),
     userFields: {
