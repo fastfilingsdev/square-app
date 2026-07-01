@@ -30,7 +30,9 @@ const PAYMENT_LINK_HEADERS = [
   'Last Click At',
   'Checkout Returned At',
   'Created By',
-  'Notes / Audit Log'
+  'Notes / Audit Log',
+  'Customer Email Status',
+  'Email Sent At'
 ];
 
 const LINK_TYPE_CERTIFICATE_CANCELLATION = 'Sales Certificate Cancellation';
