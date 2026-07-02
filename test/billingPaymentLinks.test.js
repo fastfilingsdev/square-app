@@ -112,6 +112,39 @@ test('Authorize.Net transaction request includes line items, invoice, email, cus
   assert.deepEqual(tx.userFields.userField.find(field => field.name === 'ffPaymentLinkId'), { name: 'ffPaymentLinkId', value: 'ffpl_live_20260701_abc123' });
 });
 
+test('cancellation checkout uses readable invoice numbers and state-aware description', () => {
+  const link = {
+    linkId: 'ffpl_live_20260701_baa4e518c6283cb',
+    rowObj: {
+      'Created At': '2026-07-01T23:00:00.000Z',
+      'Link Type': 'Sales Certificate Cancellation',
+      'Customer ID': 'AZ-37',
+      State: 'AZ',
+      Name: 'Gilmar Arellano',
+      Email: 'hello@example.test',
+      Purpose: 'Sales certificate cancellation assistance',
+      'Invoice #': 'FFPL-baa4e518c6283cb'
+    },
+    items: [{ name: 'Sales certificate cancellation assistance', amount: '80.00', quantity: 1 }]
+  };
+
+  const tx = buildHostedPaymentTransactionRequest(link);
+  assert.equal(tx.order.invoiceNumber, 'FFAZ37-CXL0701-3CB');
+  assert.ok(tx.order.invoiceNumber.length <= 20);
+  assert.equal(tx.order.description, 'Arizona sales certificate cancellation assistance');
+  assert.equal(tx.lineItems.lineItem[0].description, 'Arizona sales certificate cancellation assistance');
+});
+
+test('custom readable invoice numbers are preserved', () => {
+  const tx = buildHostedPaymentTransactionRequest({
+    linkId: 'ffpl_live_20260701_custom',
+    rowObj: { 'Link Type': 'Past Period Filings', 'Customer ID': 'FL-136', 'Invoice #': 'FFFL136-FIL0701-001', Purpose: 'Florida past-period filing assistance' },
+    items: [{ name: 'Past-period filing', amount: '20.00', quantity: 1 }]
+  });
+
+  assert.equal(tx.order.invoiceNumber, 'FFFL136-FIL0701-001');
+});
+
 test('live route validation blocks non-live, completed, expired, and duplicate-unsafe states', () => {
   const base = {
     linkId: 'ffpl_live_20260701_abc123',

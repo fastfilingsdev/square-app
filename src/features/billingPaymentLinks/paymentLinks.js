@@ -295,21 +295,104 @@ function splitFullName(fullName) {
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') };
 }
 
-function invoiceNumberFor(link) {
-  const existing = normalizeString(link.rowObj['Invoice #']);
-  if (existing) return existing.slice(0, 20);
-  return `FFPL-${link.linkId.replace(/^ffpl_(live|test)_?/i, '').replace(/[^A-Za-z0-9]/g, '').slice(-15)}`.slice(0, 20);
+const STATE_NAMES = {
+  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa', KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri', MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio', OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+  SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont', VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming'
+};
+
+function stateCodeFor(rowObj) {
+  const rawState = firstNonEmpty(rowObj.State, String(rowObj['Customer ID'] || '').split('-')[0]);
+  const text = normalizeString(rawState);
+  if (!text) return '';
+  const two = text.slice(0, 2).toUpperCase();
+  if (STATE_NAMES[two]) return two;
+  const found = Object.entries(STATE_NAMES).find(([, name]) => normalizeKey(name) === normalizeKey(text));
+  return found ? found[0] : two.replace(/[^A-Z]/g, '');
 }
 
-function authNetLineItems(items) {
+function stateNameFor(rowObj) {
+  const code = stateCodeFor(rowObj);
+  return STATE_NAMES[code] || firstNonEmpty(rowObj.State, code);
+}
+
+function serviceCodeFor(rowObj) {
+  if (isCertificateCancellation(rowObj)) return 'CXL';
+  if (isPastPeriodFiling(rowObj)) return 'FIL';
+  if (normalizedLinkType(rowObj).includes('multiple')) return 'MIX';
+  return 'SVC';
+}
+
+function linkDateMmdd(link) {
+  const created = normalizeString(link.rowObj['Created At']);
+  const parsed = created ? new Date(created) : null;
+  if (parsed && Number.isFinite(parsed.getTime())) {
+    return String(parsed.getUTCMonth() + 1).padStart(2, '0') + String(parsed.getUTCDate()).padStart(2, '0');
+  }
+  const idDate = String(link.linkId || '').match(/_(\d{8})_/);
+  if (idDate) return idDate[1].slice(4, 8);
+  const now = new Date();
+  return String(now.getUTCMonth() + 1).padStart(2, '0') + String(now.getUTCDate()).padStart(2, '0');
+}
+
+function oldRandomInvoiceNumber(value) {
+  return /^FFPL-[A-Za-z0-9_-]{10,}$/i.test(normalizeString(value));
+}
+
+function readableInvoiceNumberFor(link) {
+  const ref = firstNonEmpty(link.rowObj['Customer ID'], stateCodeFor(link.rowObj), 'FF')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 6) || 'FF';
+  const code = serviceCodeFor(link.rowObj);
+  const suffix = String(link.linkId || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(-3) || crypto.randomBytes(2).toString('hex').toUpperCase().slice(0, 3);
+  return `FF${ref}-${code}${linkDateMmdd(link)}-${suffix}`.slice(0, 20);
+}
+
+function invoiceNumberFor(link) {
+  const existing = normalizeString(link.rowObj['Invoice #']);
+  if (existing && !oldRandomInvoiceNumber(existing)) return existing.slice(0, 20);
+  return readableInvoiceNumberFor(link);
+}
+
+function lowerInitial(value) {
+  const text = normalizeString(value);
+  return text ? text.charAt(0).toLowerCase() + text.slice(1) : '';
+}
+
+function stateAwareCancellationText(rowObj, fallback) {
+  const stateName = stateNameFor(rowObj);
+  const base = normalizeString(fallback || 'sales certificate cancellation assistance');
+  if (!stateName || normalizeKey(base).startsWith(normalizeKey(stateName))) return base;
+  return `${stateName} ${lowerInitial(base)}`;
+}
+
+function paymentLinkDescriptionFor(link) {
+  if (isCertificateCancellation(link.rowObj)) {
+    return stateAwareCancellationText(link.rowObj, firstNonEmpty(link.rowObj.Purpose, 'sales certificate cancellation assistance')).slice(0, 255);
+  }
+  return firstNonEmpty(link.rowObj.Purpose, link.rowObj['Link Type'], 'Fast Filings service').slice(0, 255);
+}
+
+function authNetLineItems(items, rowObj = {}) {
   return {
-    lineItem: items.map((item, index) => ({
+    lineItem: items.map((item, index) => {
+      const displayName = isCertificateCancellation(rowObj)
+        ? stateAwareCancellationText(rowObj, item.name)
+        : cleanLineItemName(item.name);
+      return ({
       itemId: `FF-${index + 1}`.slice(0, 31),
-      name: cleanLineItemName(item.name).slice(0, 31) || `Item ${index + 1}`,
-      description: cleanLineItemName(item.name).slice(0, 255) || `Fast Filings item ${index + 1}`,
+      name: cleanLineItemName(displayName).slice(0, 31) || `Item ${index + 1}`,
+      description: cleanLineItemName(displayName).slice(0, 255) || `Fast Filings item ${index + 1}`,
       quantity: String(parseQuantity(item.quantity)),
       unitPrice: money(item.amount)
-    }))
+      });
+    })
   };
 }
 
@@ -318,7 +401,7 @@ function buildHostedPaymentTransactionRequest(link) {
   const amount = totalLineItems(items);
   const { firstName, lastName } = splitFullName(link.rowObj.Name);
   const invoiceNumber = invoiceNumberFor(link);
-  const description = firstNonEmpty(link.rowObj.Purpose, link.rowObj['Link Type'], 'Fast Filings service').slice(0, 255);
+  const description = paymentLinkDescriptionFor(link);
   const email = normalizeString(link.rowObj.Email);
   const customerId = normalizeString(link.rowObj['Customer ID']);
 
@@ -326,7 +409,7 @@ function buildHostedPaymentTransactionRequest(link) {
     transactionType: 'authCaptureTransaction',
     amount,
     order: { invoiceNumber, description },
-    lineItems: authNetLineItems(items),
+    lineItems: authNetLineItems(items, link.rowObj),
     // Authorize.Net's JSON API is mapped onto an XML schema where sibling
     // order matters. Keep customer before billTo; putting customer after
     // billTo triggers E00003 invalid child element errors on Accept Hosted.
@@ -469,6 +552,7 @@ async function createHostedPaymentLinkSession({ req, sheets, link, authorization
   });
 
   const transactionRequest = buildHostedPaymentTransactionRequest(link);
+  await updatePaymentLinkRow(sheets, link, { 'Invoice #': transactionRequest.order.invoiceNumber });
   const hostedToken = await getHostedPaymentPageToken(
     transactionRequest,
     hostedPaymentSettings(req, link, link.amount),
