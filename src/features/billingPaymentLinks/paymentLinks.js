@@ -32,7 +32,8 @@ const PAYMENT_LINK_HEADERS = [
   'Created By',
   'Notes / Audit Log',
   'Customer Email Status',
-  'Email Sent At'
+  'Email Sent At',
+  'Subscription ID'
 ];
 
 const LINK_TYPE_CERTIFICATE_CANCELLATION = 'Sales Certificate Cancellation';
