@@ -11,6 +11,7 @@ const {
   totalLineItems,
   validatePaymentLink
 } = require('../src/features/billingPaymentLinks/paymentLinks');
+const { __billingPaymentLinksTestHooks } = require('../src/features/billingPaymentLinks/routes');
 
 function mockReq() {
   return {
@@ -123,4 +124,19 @@ test('live route validation blocks non-live, completed, expired, and duplicate-u
   assert.throws(() => validatePaymentLink({ ...base, rowObj: { ...base.rowObj, Status: 'Draft' } }), /not ready/);
   assert.throws(() => validatePaymentLink({ ...base, rowObj: { ...base.rowObj, 'Completed At': '2026-07-01T00:00:00Z' } }), /already marked completed/);
   assert.throws(() => validatePaymentLink({ ...base, rowObj: { ...base.rowObj, 'Expires At': '2000-01-01T00:00:00Z' } }), /expired/);
+});
+
+test('payment link page uses Fast Filings and Authorize.Net branding', () => {
+  const html = __billingPaymentLinksTestHooks.renderPaymentLinkHtml({
+    link: {
+      linkId: 'ffpl_live_20260701_branding',
+      rowObj: { 'Link Type': 'Sales Certificate Cancellation', 'Customer ID': 'AZ-37', Purpose: 'Sales certificate cancellation assistance' },
+      items: [{ name: 'Sales certificate cancellation assistance', amount: '80.00', quantity: 1 }],
+      authorizationText: 'I authorize Fast Filings to prepare and submit a cancellation request.'
+    }
+  });
+
+  assert.match(html, /\/assets\/payment-update\/fast-filings-logo\.png/);
+  assert.match(html, /\/assets\/payment-update\/authorize-net-logo\.svg/);
+  assert.match(html, /Secured by/);
 });

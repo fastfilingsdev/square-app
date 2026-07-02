@@ -58,7 +58,10 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
     body { margin:0; min-height:100vh; font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--ink); background:linear-gradient(145deg, #0f172a 0%, #1d4ed8 52%, #0f766e 100%); padding:16px; display:grid; place-items:center; }
     main { width:min(100%, 760px); }
     .card { background:rgba(255,255,255,.98); border:1px solid rgba(255,255,255,.75); border-radius:26px; padding:28px; box-shadow:0 24px 70px rgba(15,23,42,.24); }
-    .brand { margin:0 0 18px; color:#0f766e; font-size:13px; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
+    .brand-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin:0 0 18px; }
+    .ff-logo { display:block; width:190px; max-width:58vw; height:auto; }
+    .authnet-badge { display:inline-flex; align-items:center; gap:9px; padding:9px 12px; border:1px solid rgba(31,95,153,.18); background:rgba(255,255,255,.88); border-radius:999px; box-shadow:0 8px 24px rgba(16,32,51,.08); color:#52627a; font-size:12px; font-weight:850; white-space:nowrap; }
+    .authnet-logo { display:block; width:132px; max-width:36vw; height:auto; }
     h1 { margin:0 0 8px; font-size:clamp(32px, 6vw, 50px); line-height:1.02; letter-spacing:-.05em; }
     .intro { margin:0 0 18px; color:#475569; font-size:16px; line-height:1.5; }
     .pill { display:inline-flex; border:1px solid #bfdbfe; background:#eff6ff; color:#1e3a8a; border-radius:999px; padding:7px 11px; font-size:12px; font-weight:900; margin-bottom:12px; }
@@ -78,12 +81,13 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
     .status-line.error { color:#b42318; }
     .fine { margin:12px 0 0; color:var(--muted); font-size:12px; line-height:1.45; text-align:center; }
     .footer { margin-top:14px; display:flex; justify-content:space-between; gap:12px; color:#94a3b8; font-size:11px; overflow-wrap:anywhere; }
+    @media (max-width:520px) { .brand-row { align-items:flex-start; } .ff-logo { width:160px; } .authnet-badge { width:100%; justify-content:space-between; } }
   </style>
 </head>
 <body>
 <main>
   <section class="card" aria-label="Fast Filings secure payment link">
-    <p class="brand">Fast Filings secure payment</p>
+    <div class="brand-row"><img class="ff-logo" src="/assets/payment-update/fast-filings-logo.png" alt="Fast Filings" /><div class="authnet-badge" aria-label="Secured by Authorize.Net"><span>Secured by</span><img class="authnet-logo" src="/assets/payment-update/authorize-net-logo.svg" alt="Authorize.Net" /></div></div>
     <span class="pill">${safeType}</span>
     <h1>Complete your payment securely.</h1>
     <p class="intro">This payment link is for <strong>${safeCustomer}</strong>: ${safePurpose}.</p>
