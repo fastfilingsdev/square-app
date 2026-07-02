@@ -39,11 +39,7 @@ function renderItems(items) {
 
 function renderPaymentLinkHtml({ link, testOnly = false }) {
   const amount = totalLineItems(link.items);
-  const safeType = escapeHtml(link.rowObj['Link Type'] || 'Fast Filings payment');
-  const safeCustomer = escapeHtml(link.rowObj['Customer ID'] || link.rowObj['Business Name'] || link.rowObj.Name || 'Fast Filings customer');
-  const safePurpose = escapeHtml(link.rowObj.Purpose || link.rowObj['Link Type'] || 'Fast Filings service');
   const safeAuthorization = escapeHtml(link.authorizationText || 'I authorize Fast Filings to process this payment for the service item(s) listed on this page.');
-  const footerLabel = testOnly ? `Test link: ${escapeHtml(link.linkId)}` : `Secure link: ${escapeHtml(link.linkId)}`;
 
   return `<!doctype html>
 <html lang="en">
@@ -64,7 +60,6 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
     .authnet-logo { display:block; width:132px; max-width:36vw; height:auto; }
     h1 { margin:0 0 8px; font-size:clamp(32px, 6vw, 50px); line-height:1.02; letter-spacing:-.05em; }
     .intro { margin:0 0 18px; color:#475569; font-size:16px; line-height:1.5; }
-    .pill { display:inline-flex; border:1px solid #bfdbfe; background:#eff6ff; color:#1e3a8a; border-radius:999px; padding:7px 11px; font-size:12px; font-weight:900; margin-bottom:12px; }
     .amount { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; padding:18px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); margin:16px 0; }
     .amount p { margin:0; }
     .label { color:var(--muted); font-size:12px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
@@ -72,7 +67,6 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
     ul { list-style:none; padding:0; margin:12px 0 0; border:1px solid var(--line); border-radius:18px; overflow:hidden; }
     li { display:flex; justify-content:space-between; gap:16px; padding:13px 15px; border-top:1px solid var(--line); color:#334155; }
     li:first-child { border-top:0; }
-    .notice { margin:14px 0; padding:13px 15px; border-radius:16px; background:#f8fafc; border:1px solid var(--line); color:#475569; line-height:1.45; }
     .consent { display:flex; gap:11px; align-items:flex-start; margin:14px 0; color:#0f172a; background:#fff; border:1px solid #cbd5e1; border-radius:16px; padding:13px; font-size:14px; line-height:1.4; cursor:pointer; }
     .consent input { width:20px; height:20px; margin:0; flex:0 0 auto; accent-color:var(--blue); }
     button { width:100%; border:0; border-radius:16px; padding:15px 16px; color:white; background:linear-gradient(135deg, #111827, #1d4ed8); font-size:16px; font-weight:950; cursor:pointer; box-shadow:0 14px 26px rgba(29,78,216,.25); }
@@ -80,7 +74,6 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
     .status-line { min-height:18px; margin:9px 0 0; color:#52627a; font-size:12px; line-height:1.35; }
     .status-line.error { color:#b42318; }
     .fine { margin:12px 0 0; color:var(--muted); font-size:12px; line-height:1.45; text-align:center; }
-    .footer { margin-top:14px; display:flex; justify-content:space-between; gap:12px; color:#94a3b8; font-size:11px; overflow-wrap:anywhere; }
     @media (max-width:520px) { .brand-row { align-items:flex-start; } .ff-logo { width:160px; } .authnet-badge { width:100%; justify-content:space-between; } }
   </style>
 </head>
@@ -88,19 +81,15 @@ function renderPaymentLinkHtml({ link, testOnly = false }) {
 <main>
   <section class="card" aria-label="Fast Filings secure payment link">
     <div class="brand-row"><img class="ff-logo" src="/assets/payment-update/fast-filings-logo.png" alt="Fast Filings" /><div class="authnet-badge" aria-label="Secured by Authorize.Net"><span>Secured by</span><img class="authnet-logo" src="/assets/payment-update/authorize-net-logo.svg" alt="Authorize.Net" /></div></div>
-    <span class="pill">${safeType}</span>
     <h1>Complete your payment securely.</h1>
-    <p class="intro">This payment link is for <strong>${safeCustomer}</strong>: ${safePurpose}.</p>
     <div class="amount"><div><p class="label">Amount due now</p><p class="price">$${amount.replace(/\.00$/, '')}</p></div><div><p class="label">Payment items</p><p>${link.items.length} item${link.items.length === 1 ? '' : 's'}</p></div></div>
     <ul aria-label="Payment item list">${renderItems(link.items)}</ul>
-    <p class="notice"><strong>Next:</strong> you’ll continue to Authorize.Net to enter payment details securely. Fast Filings will not see or store your full card number, CVV, or bank details on this page.</p>
     <form id="authnet-session-form">
       <label class="consent"><input id="authorization-checkbox" type="checkbox" required /><span>${safeAuthorization}</span></label>
       <button id="continue-button" type="submit">Continue to secure checkout</button>
       <div id="status-line" class="status-line" aria-live="polite"></div>
     </form>
     <p class="fine">Checkout is hosted by Authorize.Net. Fast Filings verifies approved payments before marking the service as paid/completed.</p>
-    <div class="footer"><span>${safeType}</span><span>${footerLabel}</span></div>
   </section>
 </main>
 <script>

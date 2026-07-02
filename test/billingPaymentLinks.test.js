@@ -140,3 +140,24 @@ test('payment link page uses Fast Filings and Authorize.Net branding', () => {
   assert.match(html, /\/assets\/payment-update\/authorize-net-logo\.svg/);
   assert.match(html, /Secured by/);
 });
+
+test('payment link page hides internal/test labels and card-storage paragraph', () => {
+  const html = __billingPaymentLinksTestHooks.renderPaymentLinkHtml({
+    link: {
+      linkId: 'ffpl_live_20260701_internal_4d10342c4f',
+      rowObj: {
+        'Link Type': 'Sales Certificate Cancellation',
+        'Customer ID': 'TEST-FFPL',
+        Purpose: 'Internal rollout test: certificate cancellation authorization + bundled past-period filing item'
+      },
+      items: [{ name: 'Sales certificate cancellation assistance', amount: '80.00', quantity: 1 }],
+      authorizationText: 'I authorize Fast Filings to prepare and submit a cancellation request.'
+    }
+  });
+
+  assert.doesNotMatch(html, /This payment link is for/i);
+  assert.doesNotMatch(html, /Fast Filings will not see or store your full card number/i);
+  assert.doesNotMatch(html, /Secure link:/i);
+  assert.doesNotMatch(html, /ffpl_live_20260701_internal_4d10342c4f/);
+  assert.doesNotMatch(html, /<span class="pill">Sales Certificate Cancellation<\/span>/);
+});
