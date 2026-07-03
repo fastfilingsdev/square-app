@@ -9,6 +9,7 @@ const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiv
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhookWatchdogAutomation } = require('./src/features/authnetWebhook/routes');
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
 const { createBillingPaymentLinksRouter } = require('./src/features/billingPaymentLinks/routes');
+const { createBrowserNavRouter } = require('./src/features/browserNav/routes');
 const { createCloverHostedCheckoutRouter } = require('./src/features/cloverHostedCheckout/routes');
 const {
   buildCloverAuthorizeUrl,
@@ -1480,6 +1481,7 @@ app.use('/authnet', createAuthNetWebhookRouter());
 app.use('/clover', createCloverHostedCheckoutRouter());
 app.use('/billing', createBillingRefundsRouter());
 app.use('/billing', createBillingPaymentLinksRouter());
+app.use('/browser-nav', createBrowserNavRouter());
 
 app.get('/', (req, res) => {
   res.send('Server is working');
