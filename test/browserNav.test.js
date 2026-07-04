@@ -42,6 +42,15 @@ function headers(token = 'test-token') {
   return { 'content-type': 'application/json', 'x-ff-sync-token': token };
 }
 
+async function waitUntil(predicate, { timeoutMs = 1000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
 const validEnv = {
   FF_SYNC_ADMIN_TOKEN: 'test-token',
   BROWSER_NAV_LIVE_ENABLED: undefined,
@@ -231,3 +240,71 @@ test('browser nav history summaries do not store snapshot text or screenshot byt
   assert.equal(Object.hasOwn(summary, 'dataBase64'), false);
   assert.equal(Object.hasOwn(summary, 'text'), false);
 });
+
+test('browser nav async jobs serialize live work per profile', () => withEnv({
+  ...validEnv,
+  BROWSER_NAV_LIVE_ENABLED: 'true'
+}, async () => {
+  const runStore = createRunStore();
+  const started = [];
+  const releases = [];
+  const router = createBrowserNavRouter({
+    runStore,
+    executeRun: async normalized => {
+      started.push({ agentId: normalized.run.agentId, profileId: normalized.run.profileId });
+      await new Promise(resolve => releases.push(resolve));
+      return {
+        ok: true,
+        status: 'completed',
+        durationMs: 5,
+        results: [{ index: 0, ok: true, durationMs: 5, result: { action: 'snapshot', title: `Run ${started.length}` } }]
+      };
+    }
+  });
+
+  await withServer(router, async base => {
+    const body = { agentId: 'mark', profileId: 'mark', steps: [{ action: 'snapshot' }] };
+    const firstRes = await fetch(`${base}/browser-nav/jobs`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+    assert.equal(firstRes.status, 202);
+    const first = await firstRes.json();
+
+    await waitUntil(() => started.length === 1);
+    assert.equal(runStore.get(first.runId).status, 'running');
+
+    const secondRes = await fetch(`${base}/browser-nav/jobs`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+    assert.equal(secondRes.status, 202);
+    const second = await secondRes.json();
+    assert.equal(second.queuePosition, 1);
+    assert.equal(runStore.get(second.runId).status, 'queued');
+
+    const queueRes = await fetch(`${base}/browser-nav/queue`, { headers: headers() });
+    assert.equal(queueRes.status, 200);
+    const queue = await queueRes.json();
+    assert.equal(queue.profiles.mark.activeRunId, first.runId);
+    assert.deepEqual(queue.profiles.mark.queuedRunIds, [second.runId]);
+
+    releases.shift()();
+    await waitUntil(() => started.length === 2);
+    assert.equal(runStore.get(first.runId).status, 'completed');
+    assert.equal(runStore.get(second.runId).status, 'running');
+
+    releases.shift()();
+    await waitUntil(() => runStore.get(second.runId).status === 'completed');
+    assert.equal(started.length, 2);
+  });
+}));
+
+test('browser nav async jobs block safely while live mode is disabled', () => withEnv(validEnv, async () => {
+  const runStore = createRunStore();
+  await withServer(createBrowserNavRouter({ runStore }), async base => {
+    const res = await fetch(`${base}/browser-nav/jobs`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ agentId: 'mark', profileId: 'mark', steps: [{ action: 'snapshot' }] })
+    });
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.status, 'blocked-live-disabled');
+    assert.equal(runStore.get(body.runId).status, 'blocked-live-disabled');
+  });
+}));

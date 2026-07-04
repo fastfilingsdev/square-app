@@ -59,6 +59,10 @@ History records intentionally do not store fill text values, cookies, request he
 
 Returns one sanitized run-history record by id. Requires admin token.
 
+### `GET /browser-nav/queue`
+
+Returns current in-memory queue state by profile. Requires admin token. The queue enforces one running browser navigation job per profile so two Mark `mark` jobs cannot act in the same browser profile at the same time.
+
 ### `POST /browser-nav/plan`
 
 Validates and normalizes a requested run without opening a browser.
@@ -79,11 +83,21 @@ Example:
 
 ### `POST /browser-nav/runs`
 
-Runs the same request shape. Behavior:
+Runs the same request shape synchronously. Behavior:
 
 - with `dryRun: true`: validates/plans only;
 - with live disabled: returns `blocked-live-disabled`;
-- with live enabled and profile CDP configured: opens an isolated CDP target and executes steps.
+- with live enabled and profile CDP configured: executes through the same per-profile queue and waits for completion.
+
+### `POST /browser-nav/jobs`
+
+Queues the same request shape asynchronously. Behavior:
+
+- with `dryRun: true`: validates/plans only;
+- with live disabled: returns `blocked-live-disabled` and does not queue;
+- with live enabled and profile CDP configured: returns `202` with `runId`, `queuePosition`, `activeRunId`, and profile info.
+
+Use `GET /browser-nav/runs/:runId` to poll sanitized completion history.
 
 ## Supported actions
 

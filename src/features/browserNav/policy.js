@@ -145,6 +145,9 @@ function getBrowserNavStatus() {
     agentPolicyEnv: 'BROWSER_NAV_AGENT_POLICIES_JSON',
     maxSteps: Number(process.env.BROWSER_NAV_MAX_STEPS || DEFAULT_MAX_STEPS),
     allowedActions: Array.from(DEFAULT_ALLOWED_ACTIONS),
+    asyncJobs: true,
+    queueEndpoint: '/browser-nav/queue',
+    concurrency: 'one-running-browser-nav-job-per-profile',
     agents: Object.fromEntries(Object.entries(policies).map(([agentId, policy]) => [agentId, {
       business: policy.business || null,
       allowedProfiles: policy.allowedProfiles || [],
