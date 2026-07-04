@@ -5,6 +5,7 @@ const express = require('express');
 
 const { createBrowserNavRouter } = require('../src/features/browserNav/routes');
 const { normalizeBrowserNavRun, getBrowserNavStatus } = require('../src/features/browserNav/policy');
+const { createRunStore, summarizeResultForHistory } = require('../src/features/browserNav/runStore');
 
 function withEnv(env, fn) {
   const old = {};
@@ -74,7 +75,7 @@ test('browser nav plan requires admin token', () => withEnv(validEnv, async () =
 }));
 
 test('browser nav dry-run returns a plan without opening a browser', () => withEnv(validEnv, async () => {
-  await withServer(createBrowserNavRouter(), async base => {
+  await withServer(createBrowserNavRouter({ runStore: createRunStore() }), async base => {
     const res = await fetch(`${base}/browser-nav/runs`, {
       method: 'POST',
       headers: headers(),
@@ -96,7 +97,7 @@ test('browser nav dry-run returns a plan without opening a browser', () => withE
 }));
 
 test('browser nav blocks live execution until explicitly enabled', () => withEnv(validEnv, async () => {
-  await withServer(createBrowserNavRouter(), async base => {
+  await withServer(createBrowserNavRouter({ runStore: createRunStore() }), async base => {
     const res = await fetch(`${base}/browser-nav/runs`, {
       method: 'POST',
       headers: headers(),
@@ -137,7 +138,7 @@ test('browser nav live route blocks cleanly when profile CDP config is missing',
   BROWSER_NAV_LIVE_ENABLED: 'true',
   BROWSER_NAV_PROFILES_JSON: '{}'
 }, async () => {
-  await withServer(createBrowserNavRouter(), async base => {
+  await withServer(createBrowserNavRouter({ runStore: createRunStore() }), async base => {
     const res = await fetch(`${base}/browser-nav/runs`, {
       method: 'POST',
       headers: headers(),
@@ -156,6 +157,7 @@ test('browser nav live route can execute through injected executor when enabled'
 }, async () => {
   let executed = false;
   const router = createBrowserNavRouter({
+    runStore: createRunStore(),
     executeRun: async normalized => {
       executed = true;
       assert.equal(normalized.run.agentId, 'mark');
@@ -177,3 +179,55 @@ test('browser nav live route can execute through injected executor when enabled'
     assert.equal(executed, true);
   });
 }));
+
+test('browser nav run history records dry-runs and can retrieve by run id', () => withEnv(validEnv, async () => {
+  const runStore = createRunStore();
+  await withServer(createBrowserNavRouter({ runStore }), async base => {
+    const runRes = await fetch(`${base}/browser-nav/runs`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        agentId: 'mark',
+        profileId: 'mark',
+        dryRun: true,
+        steps: [{ action: 'navigate', url: 'https://example.com/test' }]
+      })
+    });
+    assert.equal(runRes.status, 200);
+    const runBody = await runRes.json();
+
+    const listRes = await fetch(`${base}/browser-nav/runs?agentId=mark`, { headers: headers() });
+    assert.equal(listRes.status, 200);
+    const listBody = await listRes.json();
+    assert.equal(listBody.count, 1);
+    assert.equal(listBody.runs[0].runId, runBody.runId);
+    assert.equal(listBody.runs[0].status, 'dry-run');
+
+    const getRes = await fetch(`${base}/browser-nav/runs/${runBody.runId}`, { headers: headers() });
+    assert.equal(getRes.status, 200);
+    const getBody = await getRes.json();
+    assert.equal(getBody.run.runId, runBody.runId);
+    assert.equal(getBody.run.steps[0].urlHost, 'example.com');
+  });
+}));
+
+test('browser nav history summaries do not store snapshot text or screenshot bytes', () => {
+  const summary = summarizeResultForHistory({
+    index: 2,
+    ok: true,
+    durationMs: 7,
+    result: {
+      action: 'screenshot',
+      mimeType: 'image/png',
+      dataBase64: 'SECRET_IMAGE_BYTES',
+      byteLengthApprox: 1234,
+      text: 'Sensitive page text that should not be stored'
+    }
+  });
+
+  assert.equal(summary.action, 'screenshot');
+  assert.equal(summary.byteLengthApprox, 1234);
+  assert.equal(summary.textLength, 45);
+  assert.equal(Object.hasOwn(summary, 'dataBase64'), false);
+  assert.equal(Object.hasOwn(summary, 'text'), false);
+});

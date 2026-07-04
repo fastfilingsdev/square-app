@@ -44,6 +44,21 @@ If `BROWSER_NAV_AGENT_POLICIES_JSON` is omitted, the default Mark/Fast Filings p
 
 Returns route status, configured agents/profiles, live-execution state, and safety markers. Does not require browser access.
 
+### `GET /browser-nav/runs`
+
+Lists recent sanitized run records. Requires admin token. Optional filters:
+
+- `limit`
+- `agentId` / `agent`
+- `profileId` / `profile`
+- `status`
+
+History records intentionally do not store fill text values, cookies, request headers, screenshot bytes, or full snapshot text.
+
+### `GET /browser-nav/runs/:runId`
+
+Returns one sanitized run-history record by id. Requires admin token.
+
 ### `POST /browser-nav/plan`
 
 Validates and normalizes a requested run without opening a browser.

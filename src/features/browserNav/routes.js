@@ -3,12 +3,40 @@ const { buildAuditEvent, createRunId, writeAuditEvent } = require('./audit');
 const { executeBrowserNavRun } = require('./executor');
 const { requireBrowserNavAdmin } = require('./auth');
 const { browserNavLiveEnabled, getBrowserNavStatus, normalizeBrowserNavRun, redactProfileConfig } = require('./policy');
+const { defaultRunStore } = require('./runStore');
 
-function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
+function createBrowserNavRouter({ executeRun = executeBrowserNavRun, runStore = defaultRunStore } = {}) {
   const router = express.Router();
 
   router.get('/health', (req, res) => {
     res.json(getBrowserNavStatus());
+  });
+
+  router.get('/runs', (req, res) => {
+    if (!requireBrowserNavAdmin(req, res)) return;
+    const runs = runStore.list({
+      limit: req.query.limit,
+      agentId: req.query.agentId || req.query.agent,
+      profileId: req.query.profileId || req.query.profile,
+      status: req.query.status
+    });
+    res.json({
+      ok: true,
+      count: runs.length,
+      runs,
+      safety: 'Run history is sanitized. It does not store fill text values, cookies, request headers, screenshot bytes, or full snapshot text.'
+    });
+  });
+
+  router.get('/runs/:runId', (req, res) => {
+    if (!requireBrowserNavAdmin(req, res)) return;
+    const run = runStore.get(req.params.runId);
+    if (!run) return res.status(404).json({ ok: false, error: 'Browser nav run not found' });
+    return res.json({
+      ok: true,
+      run,
+      safety: 'Run history is sanitized. It does not store fill text values, cookies, request headers, screenshot bytes, or full snapshot text.'
+    });
   });
 
   router.post('/plan', (req, res) => {
@@ -17,6 +45,13 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     const runId = createRunId('bnplan');
     const audit = buildAuditEvent(runId, normalized, { status: normalized.ok ? 'planned' : 'blocked', ok: normalized.ok, error: normalized.errors.join('; ') || null });
     writeAuditEvent(audit);
+    runStore.createFromNormalized(runId, normalized, {
+      status: normalized.ok ? 'planned' : 'blocked',
+      ok: normalized.ok,
+      errors: normalized.errors,
+      warnings: normalized.warnings,
+      audit
+    });
     res.status(normalized.ok ? 200 : 409).json({
       ok: normalized.ok,
       runId,
@@ -37,6 +72,13 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     if (!normalized.ok) {
       const audit = buildAuditEvent(runId, normalized, { status: 'blocked', ok: false, error: normalized.errors.join('; ') });
       writeAuditEvent(audit);
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'blocked',
+        ok: false,
+        errors: normalized.errors,
+        warnings: normalized.warnings,
+        audit
+      });
       return res.status(409).json({
         ok: false,
         runId,
@@ -51,7 +93,14 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     if (normalized.run.dryRun) {
       const audit = buildAuditEvent(runId, normalized, { status: 'dry-run', ok: true });
       writeAuditEvent(audit);
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'dry-run',
+        ok: true,
+        warnings: normalized.warnings,
+        audit
+      });
       return res.status(200).json({
+
         ok: true,
         runId,
         status: 'dry-run',
@@ -66,6 +115,13 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     if (!browserNavLiveEnabled()) {
       const audit = buildAuditEvent(runId, normalized, { status: 'blocked-live-disabled', ok: false, error: 'BROWSER_NAV_LIVE_ENABLED is not true' });
       writeAuditEvent(audit);
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'blocked-live-disabled',
+        ok: false,
+        errors: ['BROWSER_NAV_LIVE_ENABLED is not true'],
+        warnings: normalized.warnings,
+        audit
+      });
       return res.status(409).json({
         ok: false,
         runId,
@@ -80,6 +136,13 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     if (!normalized.profile) {
       const audit = buildAuditEvent(runId, normalized, { status: 'blocked-profile-not-configured', ok: false, error: 'Browser profile CDP config is missing' });
       writeAuditEvent(audit);
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'blocked-profile-not-configured',
+        ok: false,
+        errors: ['Browser profile CDP config is missing'],
+        warnings: normalized.warnings,
+        audit
+      });
       return res.status(409).json({
         ok: false,
         runId,
@@ -92,9 +155,15 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     }
 
     try {
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'running',
+        ok: true,
+        warnings: normalized.warnings
+      });
       const result = await executeRun(normalized);
       const audit = buildAuditEvent(runId, normalized, { status: result.status, ok: result.ok, error: result.error || null });
       writeAuditEvent(audit);
+      runStore.recordResult(runId, result, { audit, warnings: normalized.warnings });
       return res.status(result.ok ? 200 : 409).json({
         ok: result.ok,
         runId,
@@ -110,7 +179,15 @@ function createBrowserNavRouter({ executeRun = executeBrowserNavRun } = {}) {
     } catch (err) {
       const audit = buildAuditEvent(runId, normalized, { status: 'error', ok: false, error: err.message });
       writeAuditEvent(audit);
+      runStore.createFromNormalized(runId, normalized, {
+        status: 'error',
+        ok: false,
+        errors: [err.message],
+        warnings: normalized.warnings,
+        audit
+      });
       return res.status(500).json({
+
         ok: false,
         runId,
         status: 'error',
