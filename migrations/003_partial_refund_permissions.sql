@@ -6,6 +6,11 @@ BEGIN;
 CREATE ROLE ff_refund_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE ROLE ff_refund_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 
+-- PostgreSQL 16+ role creators get ADMIN but not SET/INHERIT by default.
+-- Temporary membership permits ownership transfer and the final function ACLs
+-- for a non-superuser migration owner. Remove both capabilities before commit.
+GRANT ff_refund_executor TO CURRENT_USER WITH INHERIT TRUE, SET TRUE;
+
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO ff_refund_executor, ff_refund_runtime;
 REVOKE ALL ON public.ff_refund_operations, public.ff_refund_charge_budgets,
@@ -32,6 +37,7 @@ REVOKE ALL ON FUNCTION public.ff_claim_partial_refund(text,text,uuid,bigint,text
 REVOKE ALL ON FUNCTION public.ff_finish_partial_refund(text,text,uuid,bigint,uuid,text,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.ff_claim_partial_refund(text,text,uuid,bigint,text,uuid) TO ff_refund_runtime;
 GRANT EXECUTE ON FUNCTION public.ff_finish_partial_refund(text,text,uuid,bigint,uuid,text,text) TO ff_refund_runtime;
+GRANT ff_refund_executor TO CURRENT_USER WITH INHERIT FALSE, SET FALSE;
 -- No login/secret or membership is provisioned here. A reviewed serving login
 -- may inherit ONLY runtime, never executor/migration roles or table ownership.
 -- Historical budget seeding stays outside serving privileges; no reset API.

@@ -6,7 +6,13 @@ const sql=fs.readFileSync(path.join(__dirname,'../migrations/003_partial_refund_
 test('staged privilege migration uses two non-login roles and no credentials',()=>{
   for(const role of ['executor','runtime']) assert.ok(sql.includes(`CREATE ROLE ff_refund_${role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`));
   assert.doesNotMatch(sql,/PASSWORD|IF NOT EXISTS/);
-  assert.doesNotMatch(sql,/GRANT ff_refund_executor/);
+  const grants=sql.match(/GRANT ff_refund_executor[^;]*;/g);
+  assert.deepEqual(grants,[
+    'GRANT ff_refund_executor TO CURRENT_USER WITH INHERIT TRUE, SET TRUE;',
+    'GRANT ff_refund_executor TO CURRENT_USER WITH INHERIT FALSE, SET FALSE;'
+  ]);
+  assert.ok(sql.indexOf(grants[0])<sql.indexOf('OWNER TO ff_refund_executor;'));
+  assert.ok(sql.indexOf(grants[1])>sql.lastIndexOf('GRANT EXECUTE ON FUNCTION'));
 });
 test('runtime receives function execution but no direct table grant',()=>{
   assert.equal((sql.match(/GRANT EXECUTE ON FUNCTION/g)||[]).length,2);
