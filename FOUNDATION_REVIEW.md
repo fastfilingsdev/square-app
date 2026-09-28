@@ -53,7 +53,9 @@ are intentionally excluded from this public repository.
 History wiring requires explicit `FF_REFUND_HISTORY_ENABLED=true`, partial ledger
 mode, USD, dedicated ledger configuration and both policy attestations. These
 flags record operator verification; setting them does not perform verification.
-The legacy single-claim mode is not the approved partial-refund rollout target.
+The serving bootstrap rejects legacy single-claim mode (including an omitted
+mode with ledger configuration). It remains an isolated test adapter only and
+cannot be used to bypass the approved partial-refund/history requirements.
 
 Remaining credential migration, wider authorization findings and all state-sheet
 rollouts are separate scope; this draft does not claim the entire foundation is

@@ -7,6 +7,12 @@ const {refundTransaction}=require('../connectors/authnet/client');
 function createRefundServiceRuntime({env=process.env, onPoolError,
   ledgerFactory=createRefundLedgerRuntime, historyFactory=createRefundHistoryVerifier,
   refundTransactionFn=refundTransaction}={}) {
+  // The legacy single-claim adapter remains available for isolated tests, not
+  // serving traffic: it does not enforce the approved partial/history policy.
+  if ((env.FF_REFUND_LEDGER_DATABASE_URL || env.FF_REFUND_PROVIDER_SCOPE) &&
+      env.FF_REFUND_LEDGER_MODE !== 'partial') {
+    throw new Error('Refund history requires explicit partial ledger mode');
+  }
   const historyEnabled=env.FF_REFUND_HISTORY_ENABLED;
   if(historyEnabled !== undefined && !['true','false'].includes(historyEnabled)) {
     throw new Error('Invalid refund history configuration');

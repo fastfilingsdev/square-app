@@ -7,6 +7,14 @@ const enabled={FF_REFUND_HISTORY_ENABLED:'true',FF_REFUND_LEDGER_MODE:'partial',
   AUTHNET_API_LOGIN_ID:'synthetic',AUTHNET_TRANSACTION_KEY:'fixture-only',
   AUTHNET_API_URL:'https://apitest.authorize.net/xml/v1/request.api'};
 const ledgerFactory=()=>({routerOptions:{providerScope:'synthetic_sandbox',refundLedger:{}},close:async()=>{}});
+test('serving runtime cannot fall back to legacy single mode and bypass required history',()=>{
+  for(const mode of [undefined,'single','']) {
+    for(const history of [undefined,'false','true']) {
+      assert.throws(()=>createRefundServiceRuntime({env:{...enabled,FF_REFUND_LEDGER_MODE:mode,FF_REFUND_HISTORY_ENABLED:history},
+        ledgerFactory:()=>assert.fail('must reject before opening pool'),historyFactory:()=>assert.fail('no provider')}),/explicit partial/);
+    }
+  }
+});
 test('history remains disconnected by default and explicitly false',()=>{
   for(const env of [{},{FF_REFUND_HISTORY_ENABLED:'false'}]) {
     const runtime=createRefundServiceRuntime({env,ledgerFactory,historyFactory:()=>assert.fail('no history')});
