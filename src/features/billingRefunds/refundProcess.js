@@ -55,7 +55,8 @@ function requireLiveRefundApproval({ liveConfirm, approvedBy, reason }) {
 function parseRefundTransactionId(authNetResponse) {
   const tx = authNetResponse?.transactionResponse || authNetResponse?.createTransactionResponse?.transactionResponse || {};
   const responseCode = normalizeString(tx.responseCode);
-  const transId = normalizeString(tx.transId || tx.transactionId);
+  const rawTransId = tx.transId ?? tx.transactionId;
+  const transId = typeof rawTransId === 'string' ? rawTransId.trim() : '';
   const errorValue = tx.errors?.error;
   const errors = Array.isArray(errorValue) ? errorValue : (errorValue ? [errorValue] : []);
   if (errors.length) {
@@ -63,7 +64,9 @@ function parseRefundTransactionId(authNetResponse) {
   }
   const messageValue = tx.messages?.message;
   const messages = Array.isArray(messageValue) ? messageValue : (messageValue ? [messageValue] : []);
-  if (!transId || (responseCode && responseCode !== '1')) {
+  // A receipt ID alone does not establish approval. Do not coerce numeric IDs:
+  // large JSON numbers may already have lost precision before reaching us.
+  if (!/^[1-9][0-9]{0,29}$/.test(transId) || responseCode !== '1') {
     const message = messages.map(item => `${item.code || ''} ${item.description || ''}`.trim()).filter(Boolean).join('; ');
     throw new Error(message || 'Authorize.Net refund did not return an approved transaction id');
   }
@@ -118,6 +121,7 @@ async function processRefundLive({
   approvedBy = '',
   liveConfirm = '',
   refundTransactionFn = refundTransaction,
+  refundRequestId = '',
   ...deps
 } = {}) {
   const approvalIssues = requireLiveRefundApproval({ liveConfirm, approvedBy, reason });
@@ -155,7 +159,8 @@ async function processRefundLive({
   }
 
   const selected = dryRun.selected;
-  const key = recentKey({ transactionId: selected.transactionId, refundAmount: dryRun.refundAmount });
+  const key = refundRequestId ? `request:${refundRequestId}` :
+    recentKey({ transactionId: selected.transactionId, refundAmount: dryRun.refundAmount });
   if (!reserveRecentRefund(key)) {
     return {
       ok: false,

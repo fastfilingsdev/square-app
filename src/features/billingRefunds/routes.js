@@ -1,7 +1,8 @@
 const axios = require('axios');
 const express = require('express');
 const { buildRefundDryRun, lookupRefundCandidates, FF_BILLING_SPREADSHEET_ID, FF_SUBSCRIPTIONS_SPREADSHEET_ID } = require('./refundLookup');
-const { liveRefundsEnabled, processRefundLive } = require('./refundProcess');
+const { liveRefundsEnabled } = require('./refundProcess');
+const { createGuardedRefundProcessor } = require('./refundGuard');
 
 function bearerToken(req) {
   const auth = String(req.get('authorization') || '').trim();
@@ -57,8 +58,10 @@ async function requireBillingAccess(req, res) {
   return true;
 }
 
-function createBillingRefundsRouter() {
+function createBillingRefundsRouter({ refundLedger, providerScope, refundCurrency, verifyRefundHistoryFn, refundTransactionFn } = {}) {
   const router = express.Router();
+  const processRefund = createGuardedRefundProcessor({ ledger: refundLedger, providerScope, refundCurrency, verifyRefundHistoryFn, refundTransactionFn });
+  const providerHistoryConfigured = refundLedger?.requiresRequestId !== true || typeof verifyRefundHistoryFn === 'function';
 
   router.get('/refunds/health', (req, res) => {
     res.json({
@@ -70,7 +73,9 @@ function createBillingRefundsRouter() {
       authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
       billingSpreadsheetConfigured: Boolean(FF_BILLING_SPREADSHEET_ID()),
       subscriptionsSpreadsheetConfigured: Boolean(FF_SUBSCRIPTIONS_SPREADSHEET_ID()),
-      liveRefundsEnabled: liveRefundsEnabled(),
+      liveRefundsEnabled: liveRefundsEnabled() && Boolean(refundLedger && providerScope) && providerHistoryConfigured,
+      providerHistoryConfigured,
+      persistentLedgerConfigured: Boolean(refundLedger && providerScope),
       liveRefundEmergencyDisableEnv: 'FF_BILLING_REFUNDS_DISABLED',
       refundFailureReporting: 'structured-authnet-transaction-response-errors',
       refundCardNumberFormat: 'last4-with-expiration-XXXX',
@@ -109,7 +114,7 @@ function createBillingRefundsRouter() {
   router.post('/refunds/process', async (req, res) => {
     if (!await requireBillingAccess(req, res)) return;
     try {
-      const result = await processRefundLive(req.body || {});
+      const result = await processRefund(req.body || {});
       res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
       return res.status(result.ok ? 200 : 409).json(result);
     } catch (err) {

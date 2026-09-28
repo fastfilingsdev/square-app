@@ -4,10 +4,15 @@ const axios = require('axios');
 const crypto = require('crypto');
 const path = require('path');
 const { google } = require('googleapis');
+const { requireAdminToken, internalAdminHeaders } = require('./src/core/adminAccess');
+const { readFilingSyncInput } = require('./src/core/filingSyncPreflight');
+const { applyFilingSyncBatch } = require('./src/core/filingSyncBatch');
+const { filingTotals, needsReview } = require('./src/core/filingTotals');
 const { createPaymentUpdateRouter } = require('./src/features/paymentUpdate/routes');
 const { createSubscriptionsRouter, startNewOrdersAutomation, startRecoveredActiveSyncAutomation } = require('./src/features/subscriptions/routes');
 const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhookWatchdogAutomation } = require('./src/features/authnetWebhook/routes');
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
+const { createRefundServiceRuntime } = require('./src/core/refundServiceRuntime');
 const { createBillingPaymentLinksRouter } = require('./src/features/billingPaymentLinks/routes');
 const { createCloverHostedCheckoutRouter } = require('./src/features/cloverHostedCheckout/routes');
 const {
@@ -63,21 +68,6 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-function hasValidAdminToken(req) {
-  const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
-  if (!expected) return false;
-  const headerToken = String(req.get('x-ff-sync-token') || req.get('x-authnet-sync-token') || '').trim();
-  const auth = String(req.get('authorization') || '').trim();
-  const bearer = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
-  return headerToken === expected || bearer === expected;
-}
-
-function requireAdminToken(req, res) {
-  if (hasValidAdminToken(req)) return true;
-  res.status(401).json({ ok: false, error: 'Unauthorized request' });
-  return false;
 }
 
 function getSheetsAuth() {
@@ -802,8 +792,7 @@ async function removeExistingReviewRowsForPeriod(sheets, customerId, periodValue
     return 0;
   }
 
-  const rowsToKeep = [rows[0]];
-  let removedCount = 0;
+  const rangesToClear = [];
 
   for (let i = 1; i < rows.length; i += 1) {
     const row = rows[i] || [];
@@ -811,32 +800,20 @@ async function removeExistingReviewRowsForPeriod(sheets, customerId, periodValue
     const existingCustomerId = String(row[4] || '').trim();
 
     if (existingPeriod === String(periodValue).trim() && existingCustomerId === String(customerId).trim()) {
-      removedCount += 1;
-      continue;
+      rangesToClear.push(`'Review Queue'!A${i + 1}:N${i + 1}`);
     }
-
-    rowsToKeep.push(row);
   }
 
-  if (removedCount > 0) {
-    await sheets.spreadsheets.values.clear({
+  if (rangesToClear.length > 0) {
+    // Leave all unrelated rows in place, including their formulas and notes.
+    // Never clear/rewrite the whole queue to remove one customer's period.
+    await sheets.spreadsheets.values.batchClear({
       spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-      range: 'Review Queue!A2:N'
+      requestBody: { ranges: rangesToClear }
     });
-
-    if (rowsToKeep.length > 1) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-        range: `Review Queue!A2:N${rowsToKeep.length}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: rowsToKeep.slice(1)
-        }
-      });
-    }
   }
 
-  return removedCount;
+  return rangesToClear.length;
 }
 
 function isTokenExpiringSoon(expiresAt) {
@@ -908,10 +885,7 @@ async function refreshConnectionIfNeeded(customerId) {
 
     console.log('SQUARE TOKEN REFRESH SUCCESS:', {
       customer_id: existingCustomerId,
-      expires_at: refreshedTokenData.expires_at || existingExpiresAt,
-      access_token_prefix: refreshedTokenData.access_token
-        ? refreshedTokenData.access_token.slice(0, 12)
-        : existingAccessToken.slice(0, 12)
+      expires_at: refreshedTokenData.expires_at || existingExpiresAt
     });
 
     return refreshedTokenData.access_token || existingAccessToken;
@@ -1012,7 +986,6 @@ app.get('/callback', async (req, res) => {
     console.log('SQUARE TOKEN EXCHANGE SUCCESS:', {
       customer_id: stateData?.customerId || null,
       merchant_id: tokenData.merchant_id || null,
-      access_token_prefix: tokenData.access_token ? tokenData.access_token.slice(0, 12) : null,
       refresh_token_present: !!tokenData.refresh_token,
       expires_at: tokenData.expires_at || null,
       connections_sheet_action: connectionAction,
@@ -1478,7 +1451,9 @@ app.use('/payment-update', createPaymentUpdateRouter());
 app.use('/subscriptions', createSubscriptionsRouter());
 app.use('/authnet', createAuthNetWebhookRouter());
 app.use('/clover', createCloverHostedCheckoutRouter());
-app.use('/billing', createBillingRefundsRouter());
+const refundLedgerRuntime = createRefundServiceRuntime({ env: process.env,
+  onPoolError: message => console.error(message) });
+app.use('/billing', createBillingRefundsRouter(refundLedgerRuntime.routerOptions));
 app.use('/billing', createBillingPaymentLinksRouter());
 
 app.get('/', (req, res) => {
@@ -1486,6 +1461,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/pull-sales', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { customer_id } = req.query;
     const payments = await listSquarePayments(customer_id, {
@@ -1502,6 +1478,7 @@ app.get('/pull-sales', async (req, res) => {
 });
 
 app.get('/locations', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const response = await axios.get(
       `${SQUARE_BASE_URL}/v2/locations`,
@@ -1518,6 +1495,7 @@ app.get('/locations', async (req, res) => {
 });
 
 app.get('/sales-summary', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { customer_id } = req.query;
     const payments = await listSquarePayments(customer_id, {
@@ -1563,6 +1541,7 @@ app.get('/sales-summary', async (req, res) => {
 });
 
 app.get('/sales-tax-ready', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
@@ -1654,6 +1633,7 @@ app.get('/sales-tax-ready', async (req, res) => {
 });
 
 app.get('/orders-tax-engine', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
@@ -1860,6 +1840,7 @@ app.get('/orders-tax-engine', async (req, res) => {
 });
 
 app.get('/catalog-sync', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { customer_id } = req.query;
     const response = await axios.post(
@@ -1954,6 +1935,7 @@ app.get('/catalog-sync', async (req, res) => {
 });
 
 app.get('/catalog-enriched-orders', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
@@ -2172,6 +2154,7 @@ app.get('/catalog-enriched-orders', async (req, res) => {
 });
 
 app.get('/classification-layer', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { location_id, customer_id } = req.query;
     const sheets = await getSheetsClient();
@@ -2461,46 +2444,20 @@ app.get('/classification-layer', async (req, res) => {
 
 
 app.get('/filing-summary', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
   try {
     const { location_id, customer_id } = req.query;
     const { start, end, period } = resolveDateRange(req.query);
 
     const classificationResponse = await axios.get(`http://localhost:${PORT}/classification-layer`, {
-      params: { start, end, period, location_id, customer_id }
+      params: { start, end, period, location_id, customer_id },
+      headers: internalAdminHeaders()
     });
 
     const data = classificationResponse.data;
     const orders = data.orders || [];
 
-    let grossSalesIncludingTax = 0;
-    let grossSalesBeforeTax = 0;
-    let taxableSales = 0;
-    let nonTaxableSales = 0;
-    let needsReviewSales = 0;
-    let taxCollected = 0;
-    let reviewCount = 0;
-
-    orders.forEach(order => {
-      taxCollected += order.tax_collected || 0;
-
-      (order.line_items || []).forEach(item => {
-        const total = item.total || 0;
-        const tax = item.tax || 0;
-        const beforeTax = total - tax;
-
-        grossSalesIncludingTax += total;
-        grossSalesBeforeTax += beforeTax;
-
-        if (item.classification_status === 'taxable') {
-          taxableSales += total;
-        } else if (item.classification_status === 'non_taxable') {
-          nonTaxableSales += total;
-        } else {
-          needsReviewSales += total;
-          reviewCount += 1;
-        }
-      });
-    });
+    const totals = filingTotals(orders);
 
     res.json({
       period: {
@@ -2517,15 +2474,7 @@ app.get('/filing-summary', async (req, res) => {
         'gross_sales_including_tax uses line item total amounts',
         'gross_sales_before_tax subtracts line item tax from line item totals'
       ],
-      totals: {
-        gross_sales_before_tax: grossSalesBeforeTax,
-        gross_sales_including_tax: grossSalesIncludingTax,
-        taxable_sales: taxableSales,
-        non_taxable_sales: nonTaxableSales,
-        needs_review_sales: needsReviewSales,
-        tax_collected: taxCollected,
-        review_count: reviewCount
-      }
+      totals
     });
   } catch (err) {
     console.error('FILING SUMMARY ERROR:', err.response?.data || err.message);
@@ -2599,7 +2548,7 @@ async function getCustomerMapping(sheets, squareCustomerId) {
   }
 }
 
-async function getCustomerRecordByInternalId(sheets, internalCustomerId) {
+async function getCustomerRecordByInternalId(sheets, internalCustomerId, { requireUnique = false } = {}) {
   const fallback = {
     internalCustomerId: internalCustomerId || '',
     squareCustomerId: '',
@@ -2642,6 +2591,12 @@ async function getCustomerRecordByInternalId(sheets, internalCustomerId) {
       return fallback;
     }
 
+    if (requireUnique) {
+      const matches = rows.slice(headerRowIndex + 1).filter(row =>
+        String((row || [])[internalCustomerIdIndex] || '').trim() === String(internalCustomerId).trim());
+      if (matches.length !== 1) return fallback;
+    }
+
     for (let i = headerRowIndex + 1; i < rows.length; i += 1) {
       const row = rows[i] || [];
       const existingInternalCustomerId = String(row[internalCustomerIdIndex] || '').trim();
@@ -2666,10 +2621,23 @@ async function getCustomerRecordByInternalId(sheets, internalCustomerId) {
 }
 
 
-app.get('/push-to-sheets', async (req, res) => {
+app.get('/push-to-sheets', (req, res) => {
+  res.set('Allow', 'POST');
+  res.status(405).json({ ok: false, error: 'Use authenticated POST for sheet updates' });
+});
+
+app.post('/push-to-sheets', async (req, res) => {
+  if (!requireAdminToken(req, res)) return;
+  let writeAttempted = false;
+  let syncStage = 'preflight';
+  let filingContext = {};
   try {
     const { location_id, customer_id } = req.query;
     const { start, end, period } = resolveDateRange(req.query);
+
+    if (typeof customer_id !== 'string' || !customer_id.trim()) {
+      return res.status(400).json({ ok: false, error: 'A single customer_id is required for sheet updates.' });
+    }
 
     if (!process.env.GOOGLE_SHEETS_SPREADSHEET_ID || !process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
       return res.status(500).json({
@@ -2677,33 +2645,34 @@ app.get('/push-to-sheets', async (req, res) => {
       });
     }
 
-    const filingResponse = await axios.get(`http://localhost:${PORT}/filing-summary`, {
-      params: { start, end, period, location_id, customer_id }
-    });
-
-    const filingData = filingResponse.data;
-    const totals = filingData.totals || {};
+    // Resolve the write identity before requesting financial reports. Never
+    // substitute a first-order merchant or UNKNOWN after a lookup failure.
+    const sheets = await getSheetsClient();
+    const customerMapping = await getCustomerRecordByInternalId(sheets, customer_id, { requireUnique: true });
+    const squareCustomerId = String(customerMapping.squareCustomerId || '').trim();
+    if (!squareCustomerId || squareCustomerId.toUpperCase() === 'UNKNOWN' ||
+        customerMapping.internalCustomerId !== customer_id.trim()) {
+      return res.status(409).json({ ok: false, error: 'Customer mapping could not be uniquely verified. No sheet updates performed.' });
+    }
 
     const classificationResponse = await axios.get(`http://localhost:${PORT}/classification-layer`, {
-      params: { start, end, period, location_id, customer_id }
+      params: { start, end, period, location_id, customer_id },
+      headers: internalAdminHeaders()
     });
 
     const classificationData = classificationResponse.data;
     const classificationCounts = classificationData.counts || {};
     const orders = classificationData.orders || [];
-    const firstOrder = orders[0] || {};
-    const firstLine = (firstOrder.line_items || [])[0] || {};
+    if (orders.some(order => order.square_customer_id && String(order.square_customer_id).trim() !== squareCustomerId)) {
+      return res.status(409).json({ ok: false, error: 'Report merchant does not match the verified customer. No sheet updates performed.' });
+    }
+    const totals = filingTotals(orders);
     const periodValue = buildPeriodLabel(start, end, period);
+    filingContext = { period: periodValue, customer_id: customerMapping.internalCustomerId };
     const periodStart = start || '';
     const periodEnd = end || '';
-    const sheets = await getSheetsClient();
-    const customerRecord = await getCustomerRecordByInternalId(sheets, customer_id);
-    const squareCustomerId = customerRecord.squareCustomerId || firstOrder.square_customer_id || 'UNKNOWN';
-    const customerMapping = customerRecord.squareCustomerId
-      ? customerRecord
-      : await getCustomerMapping(sheets, squareCustomerId);
-    const customerId = customerMapping.internalCustomerId || squareCustomerId;
-    const businessName = customerMapping.businessName || firstLine.catalog?.name || firstLine.order_name || 'Unknown Business';
+    const customerId = customerMapping.internalCustomerId;
+    const businessName = customerMapping.businessName || 'Unknown Business';
     const customerName = customerMapping.name || '';
     const state = customerMapping.state || 'UNKNOWN';
     const periodType = customerMapping.filingFrequency || 'Monthly';
@@ -2733,72 +2702,14 @@ app.get('/push-to-sheets', async (req, res) => {
       ''
     ];
 
-    const filingsReadResponse = await sheets.spreadsheets.values.get({
-      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-      range: 'Filings!A:T'
-    });
-
-    const existingFilingsRows = filingsReadResponse.data.values || [];
-    let filingsRowNumber = null;
-
-    for (let i = 1; i < existingFilingsRows.length; i += 1) {
-      const row = existingFilingsRows[i] || [];
-      const existingPeriod = row[1] || '';
-      const existingCustomerId = row[3] || '';
-
-      if (existingPeriod === periodValue && existingCustomerId === customerId) {
-        filingsRowNumber = i + 1;
-        break;
-      }
-    }
-
-    // === LOCK CHECK ===
-    if (filingsRowNumber) {
-      const lockedValue = existingFilingsRows[filingsRowNumber - 1][16]; // column Q = Locked
-
-      if (String(lockedValue).toLowerCase() === 'true') {
-        return res.status(400).json({
-          success: false,
-          error: 'This filing is LOCKED and cannot be overwritten.',
-          period: periodValue,
-          customer_id: customerId
-        });
-      }
-    }
-
-    let filingsAction = 'appended';
-
-    if (filingsRowNumber) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-        range: `Filings!A${filingsRowNumber}:T${filingsRowNumber}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [filingsRow]
-        }
-      });
-      filingsAction = 'updated';
-    } else {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-        range: 'Filings!A:T',
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [filingsRow]
-        }
-      });
-    }
-
-    const removedReviewRows = await removeExistingReviewRowsForPeriod(sheets, customerId, periodValue);
-
     const reviewRows = [];
     orders.forEach(order => {
       // Only include orders for this customer (prevents UNKNOWN duplicates)
-      if (order.square_customer_id && order.square_customer_id !== squareCustomerId) {
+      if (order.square_customer_id && String(order.square_customer_id).trim() !== squareCustomerId) {
         return;
       }
       (order.line_items || []).forEach(item => {
-        if (item.classification_status === 'needs_review') {
+        if (needsReview(item)) {
           reviewRows.push([
             state,
             periodValue,
@@ -2819,50 +2730,60 @@ app.get('/push-to-sheets', async (req, res) => {
       });
     });
 
-    let reviewRowsToWrite = reviewRows;
-
-    if (reviewRowsToWrite.length > 0) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-        range: 'Review Queue!A:N',
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: reviewRowsToWrite
-        }
-      });
-    }
-    const customerLastSyncAction = await syncCustomerLastSyncDate(sheets, customerId, syncTimestamp);
+    // Resolve the observed row-three schemas, identity, locks and every target
+    // before any mutation. Never fall back to sequential writes after failure.
+    const input = await readFilingSyncInput(sheets, process.env.GOOGLE_SHEETS_SPREADSHEET_ID, {
+      customerId, merchantId: squareCustomerId, period: periodValue,
+      filingValues: filingsRow, reviewRows, stampValue: syncTimestamp.toISOString()
+    });
+    writeAttempted = true; // A rejected transport may follow a complete commit.
+    syncStage = 'atomic_batch';
+    const result = await applyFilingSyncBatch(sheets, process.env.GOOGLE_SHEETS_SPREADSHEET_ID, input);
 
     res.json({
       success: true,
       message: 'Pushed filing summary to Google Sheets.',
       filings_row_written: true,
-      filings_action: filingsAction,
-      review_rows_written: reviewRowsToWrite.length,
-      review_rows_removed: removedReviewRows,
-      customer_last_sync_action: customerLastSyncAction
+      filings_action: result.filingAction,
+      review_rows_written: result.reviewWritten,
+      review_rows_removed: result.reviewRemoved,
+      customer_last_sync_action: 'updated'
     });
   } catch (err) {
-    console.error('SHEETS PUSH ERROR:', err.response?.data || err.message);
-    res.status(500).json(err.response?.data || { error: err.message });
+    if (!writeAttempted && err.code === 'SHEET_SYNC_LOCKED') {
+      return res.status(400).json({ success: false, code: err.code,
+        error: 'This filing is LOCKED and cannot be overwritten.',
+        ...filingContext,
+        requires_reconciliation: false, automatic_retry_allowed: false });
+    }
+    if (!writeAttempted && ['SHEET_SYNC_SCHEMA_MISMATCH', 'SHEET_SYNC_IDENTITY_MISMATCH',
+      'SHEET_SYNC_DUPLICATE_FILING', 'SHEET_SYNC_UNKNOWN_LOCK', 'SHEET_SYNC_FORMULA_TARGET',
+      'SHEET_SYNC_MERGED_TARGET'].includes(err.code)) {
+      return res.status(409).json({ success: false, code: err.code,
+        error: err.code === 'SHEET_SYNC_DUPLICATE_FILING'
+          ? 'Multiple filings match this customer and period. No sheet updates performed.'
+          : 'Sheet schema, identity or controls could not be verified. No sheet updates performed.',
+        requires_reconciliation: false, automatic_retry_allowed: false });
+    }
+    // Do not echo upstream bodies (which may contain customer/configuration
+    // data). Callers must reconcile an attempted write before any replay.
+    console.error('SHEETS PUSH ERROR:', { stage: syncStage, writeAttempted });
+    res.status(500).json({
+      success: false,
+      code: writeAttempted ? 'SHEET_SYNC_RECONCILIATION_REQUIRED' : 'SHEET_SYNC_PREFLIGHT_FAILED',
+      stage: syncStage,
+      requires_reconciliation: writeAttempted,
+      automatic_retry_allowed: false,
+      error: writeAttempted
+        ? 'Sheet data may already have changed. Reconcile this customer and period before retrying.'
+        : 'Sheet sync failed before attempting sheet writes. Inspect the failure before retrying.'
+    });
   }
 });
 
+// Configuration and credential fragments must not be exposed over HTTP.
 app.get('/debug-env', (req, res) => {
-  res.json({
-    hasClientId: !!process.env.SQUARE_CLIENT_ID,
-    hasClientSecret: !!process.env.SQUARE_CLIENT_SECRET,
-    hasAccessToken: !!process.env.SQUARE_ACCESS_TOKEN,
-    clientIdPrefix: process.env.SQUARE_CLIENT_ID?.slice(0, 18) || null,
-    accessTokenPrefix: process.env.SQUARE_ACCESS_TOKEN?.slice(0, 8) || null,
-    squareBaseUrl: SQUARE_BASE_URL,
-    hasGoogleSpreadsheetId: !!process.env.GOOGLE_SHEETS_SPREADSHEET_ID,
-    hasGoogleServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    hasGooglePrivateKey: !!process.env.GOOGLE_PRIVATE_KEY,
-    googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || null,
-    googlePrivateKeyPrefix: process.env.GOOGLE_PRIVATE_KEY ? process.env.GOOGLE_PRIVATE_KEY.slice(0, 30) : null,
-    sampleManualPullExample: '/push-to-sheets?customer_id=CUS-0001&period=03.26'
-  });
+  res.status(404).json({ ok: false, error: 'Not found' });
 });
 
 app.listen(PORT, () => {
@@ -2877,6 +2798,12 @@ app.get('/clover-payments', async (req, res) => {
   if (!requireAdminToken(req, res)) return;
 
   try {
+    if (req.query.base_url !== undefined) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Passing Clover base_url in the query string is disabled. Use the configured provider URL only.'
+      });
+    }
     if (req.query.access_token) {
       return res.status(400).json({
         ok: false,
@@ -2886,8 +2813,7 @@ app.get('/clover-payments', async (req, res) => {
 
     const { start, end } = resolveDateRange(req.query);
     const cloverConfig = getCloverConfig({
-      merchantId: req.query.merchant_id,
-      baseUrl: req.query.base_url
+      merchantId: req.query.merchant_id
     });
 
     const payments = await listCloverPayments({
