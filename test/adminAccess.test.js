@@ -77,7 +77,7 @@ function loadServerRoutes({ env = {}, axiosGet, google } = {}) {
       if (name === 'axios') return { get: axiosGet || forbidden, post: forbidden };
       if (name === 'googleapis') return { google: google || { auth: { GoogleAuth: forbidden }, sheets: forbidden } };
       if (name === './src/core/adminAccess') return core.exports;
-      if (['./src/core/filingSyncPreflight', './src/core/filingSyncBatch', './src/core/filingTotals', './src/core/refundServiceRuntime'].includes(name)) return require('../' + name);
+      if (['./src/core/filingSyncPreflight', './src/core/filingSyncBatch', './src/core/filingTotals', './src/core/refundServiceRuntime', './src/core/sqCustomerSync'].includes(name)) return require('../' + name);
       if (name.startsWith('./src/features/')) return features;
       if (['crypto', 'path'].includes(name)) return require(name);
       throw new Error('Unexpected test dependency: ' + name);

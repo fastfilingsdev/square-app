@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { google } = require('googleapis');
 const { requireAdminToken, internalAdminHeaders } = require('./src/core/adminAccess');
+const { triggerSqCustomerSync } = require('./src/core/sqCustomerSync');
 const { readFilingSyncInput } = require('./src/core/filingSyncPreflight');
 const { applyFilingSyncBatch } = require('./src/core/filingSyncBatch');
 const { filingTotals, needsReview } = require('./src/core/filingTotals');
@@ -966,14 +967,9 @@ app.get('/callback', async (req, res) => {
 
     if (sqCustomerSyncUrl) {
       try {
-        await axios.get(sqCustomerSyncUrl, {
-          params: {
-            run: 'syncCustomers'
-          },
-          timeout: 15000
-        });
+        await triggerSqCustomerSync({ http: axios });
       } catch (syncErr) {
-        console.error('SQ CUSTOMER SYNC TRIGGER ERROR:', syncErr.response?.data || syncErr.message);
+        console.error('SQ CUSTOMER SYNC TRIGGER UNCONFIRMED; operator reconciliation required');
       }
     }
 

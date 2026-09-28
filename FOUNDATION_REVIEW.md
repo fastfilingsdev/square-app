@@ -6,6 +6,31 @@ without the required server-owned persistence configuration.
 
 ## Proposed changes
 
+- Paired sales-tax callers: authenticated POST import, signed timestamp/nonce
+  connection sync, and consolidated Apps Script identity checks. Candidate sources
+  are in integrations/sales-tax; these are NOT automatically installed in Google.
+  Both ends require coordinated rollout. Keep the webhook disabled until tested.
+
+### Sales-tax verification update
+
+43 additional repository tests cover caller contracts, signed-request rejection,
+replay/storage limits and consolidated sync behavior. A separate isolated Google
+test passed customer/state sync, protected-field preservation and duplicate-ID
+rejection using synthetic data only. It used one fixture workbook for both sides;
+it did not test deployed webhook redirects/authentication, cross-workbook access,
+new-row append or timed triggers. Manual/backend edit races remain a rollout gate.
+Do not mistake local mocked tests or this bounded native pass for production approval.
+
+Installation replaces the old import file with 02_Sales_Data_Import.gs; replaces
+all three old state/customer sync files with 04_ConnectionsSync.gs; and replaces
+the old webhook with 07_Webhook.gs. Do not append duplicate globals. A dedicated
+SQ_CUSTOMER_SYNC_SECRET must match backend and Script Properties; never reuse
+billing credentials. The webhook defaults off. No secrets or private native fixture
+identifiers are included here. Existing notes and filing stamps are preserved;
+ambiguous identities stop the sync for reconciliation instead of choosing a row.
+
+### Other foundation changes
+
 - Require admin authentication on reporting routes and fixed-loopback calls;
   reject GET sheet mutations, debug configuration disclosure and caller-chosen
   Clover destinations. Return 401 explicitly for unauthorized payment links.
