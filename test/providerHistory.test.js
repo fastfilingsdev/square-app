@@ -158,6 +158,28 @@ test('pending rows never use settled-summary fast path',async()=>{
   assert.equal(result.hasUncertainRefunds,true);
   assert.ok(f.calls.some(x=>x[0]==='detail'&&x[1]==='102'));
 });
+test('explicit historical declined and voided summaries cannot consume refundable capacity',async()=>{
+  for(const status of ['declined','voided'])for(const amount of ['0.00','50.00']) {
+    const f=fixture();const get=f.provider.getTransactionListForBatch;
+    f.provider.getTransactionListForBatch=async(b,p)=>{
+      const d=await get(b,p);d.transactions=d.transactions.map(r=>r.transId==='103'?{...r,transactionStatus:status,settleAmount:amount}:r);return d;
+    };
+    assert.equal((await f.run()).remainingAmount,'70.00');
+    assert.equal(f.calls.some(x=>x[0]==='detail'&&x[1]==='103'),false);
+  }
+});
+test('errors, review states and malformed or credit-hinted terminal summaries retain detail checks',async()=>{
+  for(const patch of [{transactionStatus:'generalError'},{transactionStatus:'communicationError'},
+    {transactionStatus:'couldNotVoid'},{transactionStatus:'expired'},{transactionStatus:'failedReview'},
+    {transactionStatus:'Declined'},{settleAmount:undefined},{settleAmount:'-1.00'},
+    {transactionType:'refundTransaction'},{transactionType:'unknown'},{refTransId:'100'}]) {
+    const f=fixture();const get=f.provider.getTransactionListForBatch;
+    f.provider.getTransactionListForBatch=async(b,p)=>{
+      const d=await get(b,p);d.transactions=d.transactions.map(r=>r.transId==='103'?{...r,transactionStatus:'declined',settleAmount:'50.00',...patch}:r);return d;
+    };
+    await f.run();assert.ok(f.calls.some(x=>x[0]==='detail'&&x[1]==='103'));
+  }
+});
 test('read concurrency is bounded and invalid configurations fail before reads',async()=>{
   for(const concurrency of [0,5,1.5,NaN]) {
     const f=fixture();await assert.rejects(f.run({concurrency}),/incomplete/);assert.equal(f.calls.length,0);
@@ -208,7 +230,7 @@ test('merchant-scale complete scan stays fresh without truncating pages or credi
     getTransactionListForBatch:(b,p)=>{
       batchPages++;assert.equal(p.offset,1);
       const transactions=Array.from({length:100},(_,i)=>({transId:String(Number(b)*1000+i),
-        transactionStatus:'settledSuccessfully',settleAmount:'20.00'}));
+        transactionStatus:i<75?'settledSuccessfully':i<95?'declined':'voided',settleAmount:'20.00'}));
       if(b==='500')transactions.push({transId:'101',transactionStatus:'refundSettledSuccessfully',settleAmount:'20.00'});
       return read({totalNumInResultSet:transactions.length,transactions});
     },

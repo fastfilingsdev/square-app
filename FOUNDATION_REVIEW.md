@@ -36,12 +36,15 @@ The collector now limits parallel reads to four, stops scheduling after failure,
 and drains in-flight reads before rejecting. All batch pages remain enumerated.
 Only positive, explicit `settledSuccessfully` summaries in settled batches, with
 no credit-reference or conflicting type, avoid redundant details. Every refund,
-pending, unknown, missing or contradictory summary still gets details. Exact
+pending, unknown, missing or contradictory summary still gets details. Historical
+explicit declined/voided summaries also avoid details only with valid amounts
+and no contradictory type/reference; they cannot settle. Errors, review states,
+expired and couldNotVoid are NOT treated as definitive declines/voids. Exact
 reference matching, inventory rechecks, 25-second deadline and 30-second evidence
 freshness remain unchanged. No cached/partial balance or stale timestamp fallback.
 
-Six added regressions cover classification, pending records, concurrency/failure
-drain and 11,600 settled charges plus a linked refund. A fresh provider retest is
+Eight added regressions cover classification, pending records, concurrency/failure
+drain and 11,600 mixed charge/decline/void summaries plus a linked refund. A fresh provider retest is
 required for this version; local performance evidence alone is not sign-off.
 
 ### Prior reviewed correction
@@ -58,7 +61,7 @@ It never retries the signed POST, other statuses, or transport errors. Persisten
 
 ### Repository regressions
 
-440 tests passed locally with networking denied, zero failures or skipped tests:
+442 tests passed locally with networking denied, zero failures or skipped tests:
 
 ```sh
 node --require ./test/noNetwork.cjs --test test/*.test.js

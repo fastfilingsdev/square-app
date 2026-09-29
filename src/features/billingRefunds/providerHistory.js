@@ -34,6 +34,14 @@ function settledChargeSummary(row) {
       (row.transactionType!=null && !['authCaptureTransaction','priorAuthCaptureTransaction','captureOnlyTransaction'].includes(row.transactionType))) return false;
   try { return minorUnits(row.settleAmount)>0n; } catch { return false; }
 }
+function terminalNoSettlementSummary(row) {
+  // Explicit declined/voided transactions cannot subsequently settle. Do not
+  // generalize this to errors, expired/review states or a substring match.
+  // Keep contradictory types/references on the conservative detail path.
+  if(!['declined','voided'].includes(row.transactionStatus) || row.refTransId!=null || row.refTransID!=null ||
+      (row.transactionType!=null && !['authCaptureTransaction','authOnlyTransaction','priorAuthCaptureTransaction','captureOnlyTransaction','voidTransaction'].includes(row.transactionType))) return false;
+  try { minorUnits(row.settleAmount); return true; } catch { return false; }
+}
 
 // Read-only full-coverage collector. No invoice/email heuristics, truncation,
 // retries, credential logging, or writes. Work limits FAIL rather than returning
@@ -137,7 +145,7 @@ async function readRefundProviderHistory(operation, {
     }
     const refunds=[]; let used=0n; let uncertain=false;
     const inspected=await bounded([...transactions.values()],async row=>{
-      if(!pendingIds.has(row.transId) && settledChargeSummary(row)) return null;
+      if(!pendingIds.has(row.transId) && (settledChargeSummary(row) || terminalNoSettlementSummary(row))) return null;
       const tx=await detail(row.transId);
       if(tx.transactionType!=='refundTransaction') {
         if(!['authCaptureTransaction','authOnlyTransaction','priorAuthCaptureTransaction','captureOnlyTransaction','voidTransaction'].includes(tx.transactionType) ||
