@@ -123,3 +123,100 @@ test('actual guard refuses pending refund evidence before ledger claim or provid
   const result=await process({requestId:'00000000-0000-4000-8000-000000000001'});
   assert.equal(result.code,'REFUND_PROVIDER_HISTORY_UNVERIFIED');
 });
+
+test('only positive settled-charge summaries avoid redundant details',async()=>{
+  const f=fixture();const get=f.provider.getTransactionListForBatch;
+  f.provider.getTransactionListForBatch=async(b,p)=>{
+    const result=await get(b,p);
+    result.transactions=result.transactions.map(r=>r.transId==='103'?{...r,transactionStatus:'settledSuccessfully',settleAmount:'50.00'}:r);
+    return result;
+  };
+  const result=await f.run();
+  assert.equal(result.remainingAmount,'70.00');
+  assert.equal(f.calls.some(x=>x[0]==='detail'&&x[1]==='103'),false);
+  for(const id of ['100','101','102','104']) assert.ok(f.calls.some(x=>x[0]==='detail'&&x[1]===id));
+});
+test('ambiguous, malformed or credit-hinted summaries still require details',async()=>{
+  for(const patch of [{transactionStatus:undefined},{transactionStatus:'SETTLEDSUCCESSFULLY'},
+    {transactionStatus:'refundSettledSuccessfully'},{settleAmount:undefined},{settleAmount:'0.00'},
+    {settleAmount:'-1.00'},{settleAmount:'1.001'},{transactionType:'refundTransaction'},
+    {transactionType:'unknown'},{refTransId:'100'},{refTransID:'100'}]) {
+    const f=fixture();const get=f.provider.getTransactionListForBatch;
+    f.provider.getTransactionListForBatch=async(b,p)=>{
+      const result=await get(b,p);
+      result.transactions=result.transactions.map(r=>r.transId==='103'?{...r,transactionStatus:'settledSuccessfully',settleAmount:'50.00',...patch}:r);
+      return result;
+    };
+    await f.run();assert.ok(f.calls.some(x=>x[0]==='detail'&&x[1]==='103'));
+  }
+});
+test('pending rows never use settled-summary fast path',async()=>{
+  const f=fixture();
+  f.provider.getUnsettledTransactionList=async()=>success({totalNumInResultSet:1,
+    transactions:[{transId:'102',transactionStatus:'settledSuccessfully',settleAmount:'10.00'}]});
+  const result=await f.run();
+  assert.equal(result.hasUncertainRefunds,true);
+  assert.ok(f.calls.some(x=>x[0]==='detail'&&x[1]==='102'));
+});
+test('read concurrency is bounded and invalid configurations fail before reads',async()=>{
+  for(const concurrency of [0,5,1.5,NaN]) {
+    const f=fixture();await assert.rejects(f.run({concurrency}),/incomplete/);assert.equal(f.calls.length,0);
+  }
+  const f=fixture();let active=0,peak=0;
+  for(const key of Object.keys(f.provider)) {
+    const read=f.provider[key];f.provider[key]=async(...args)=>{
+      peak=Math.max(peak,++active);await new Promise(resolve=>setImmediate(resolve));
+      try{return await read(...args);}finally{active--;}
+    };
+  }
+  assert.equal((await f.run()).remainingAmount,'70.00');
+  assert.ok(peak>1&&peak<=4);assert.equal(active,0);
+});
+test('failed parallel read stops new work and drains in-flight requests before rejection',async()=>{
+  const f=fixture({pending:false});let active=0,finished=0,started=0;
+  const get=f.provider.getTransactionDetails;
+  f.provider.getTransactionDetails=async id=>{
+    if(id==='100')return get(id);
+    started++;active++;
+    await new Promise(resolve=>setImmediate(resolve));
+    active--;finished++;
+    if(id==='101')throw Error('SECRET');
+    return get(id);
+  };
+  await assert.rejects(f.run(),err=>/incomplete/.test(err.message)&&!err.message.includes('SECRET'));
+  assert.equal(active,0);assert.equal(started,finished);
+  const finishedAtReturn=finished;await new Promise(resolve=>setImmediate(resolve));assert.equal(finished,finishedAtReturn);
+});
+test('merchant-scale complete scan stays fresh without truncating pages or credit evidence',async()=>{
+  let clock=NOW,queue=[],scheduled=false,peak=0,detailCount=0,batchPages=0;
+  function read(payload){return new Promise(resolve=>{
+    queue.push(()=>resolve(success(payload)));peak=Math.max(peak,queue.length);
+    if(!scheduled){scheduled=true;setImmediate(()=>{const wave=queue;queue=[];scheduled=false;clock+=180;wave.forEach(done=>done());});}
+  });}
+  const from=NOW-116*86400000;
+  const batches=Array.from({length:116},(_,i)=>({batchId:String(500+i),
+    settlementTimeUTC:new Date(from+(i+1)*86400000-1000).toISOString(),settlementState:'settledSuccessfully'}));
+  const provider={
+    getTransactionDetails:id=>{
+      detailCount++;
+      if(id==='100')return read({transaction:{transId:id,transactionType:'authCaptureTransaction',
+        transactionStatus:'settledSuccessfully',settleAmount:'20.00',submitTimeUTC:new Date(from).toISOString()}});
+      assert.equal(id,'101');return read({transaction:{transId:id,transactionType:'refundTransaction',
+        transactionStatus:'refundSettledSuccessfully',refTransId:'100',settleAmount:'20.00'}});
+    },
+    getSettledBatchList:range=>read({batchList:batches.filter(b=>Date.parse(b.settlementTimeUTC)>=Date.parse(range.firstSettlementDate)&&Date.parse(b.settlementTimeUTC)<=Date.parse(range.lastSettlementDate))}),
+    getTransactionListForBatch:(b,p)=>{
+      batchPages++;assert.equal(p.offset,1);
+      const transactions=Array.from({length:100},(_,i)=>({transId:String(Number(b)*1000+i),
+        transactionStatus:'settledSuccessfully',settleAmount:'20.00'}));
+      if(b==='500')transactions.push({transId:'101',transactionStatus:'refundSettledSuccessfully',settleAmount:'20.00'});
+      return read({totalNumInResultSet:transactions.length,transactions});
+    },
+    getUnsettledTransactionList:()=>read({totalNumInResultSet:0,transactions:[]})
+  };
+  const evidence=await readRefundProviderHistory(operation,{provider,now:()=>clock});
+  assert.equal(evidence.complete,true);assert.equal(evidence.remainingAmount,'0.00');
+  assert.equal(evidence.refunds.length,1);assert.equal(batchPages,116);assert.equal(detailCount,3);
+  assert.ok(clock-NOW<10000);assert.ok(peak<=4);assert.equal(evidence.checkedAtMs,NOW);
+  assert.throws(()=>validateRefundProviderEvidence(operation,{...evidence,linkedRefundPolicyVerified:true,unlinkedCreditsExcluded:true},clock),/exceeds verified provider balance/);
+});

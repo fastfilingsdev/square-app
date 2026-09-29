@@ -25,25 +25,50 @@ function count(data, items) {
 }
 function fingerprint(items) { return items.map(x=>x.transId).sort().join(','); }
 
+// Reporting distinguishes settledSuccessfully (charge) from
+// refundSettledSuccessfully (credit). Only skip a redundant detail fetch for an
+// explicit, positive settled charge in a settled batch, without credit hints.
+// Pending, unknown, missing and contradictory summaries ALWAYS need details.
+function settledChargeSummary(row) {
+  if(row.transactionStatus!=='settledSuccessfully' || row.refTransId!=null || row.refTransID!=null ||
+      (row.transactionType!=null && !['authCaptureTransaction','priorAuthCaptureTransaction','captureOnlyTransaction'].includes(row.transactionType))) return false;
+  try { return minorUnits(row.settleAmount)>0n; } catch { return false; }
+}
+
 // Read-only full-coverage collector. No invoice/email heuristics, truncation,
 // retries, credential logging, or writes. Work limits FAIL rather than returning
 // an incomplete balance. Inventory rechecks detect settlement/page movement;
 // this is not an atomic provider snapshot or a lock against manual refunds.
 async function readRefundProviderHistory(operation, {
   provider=client, now=Date.now, pageSize=1000, maxPages=1000, maxCalls=10000,
-  maxDurationMs=25000, maxHistoryDays=366
+  maxDurationMs=25000, maxHistoryDays=366, concurrency=4
 } = {}) {
   try {
     if (!id(operation?.transactionId) || operation.currency !== 'USD') fail();
     for(const n of [pageSize,maxPages,maxCalls,maxDurationMs,maxHistoryDays]) if(!Number.isSafeInteger(n)||n<=0) fail();
-    if(pageSize>1000 || maxPages>100000 || maxHistoryDays>366) fail();
+    if(pageSize>1000 || maxPages>100000 || maxHistoryDays>366 || !Number.isSafeInteger(concurrency) || concurrency<1 || concurrency>4) fail();
     const started=now(); if(!Number.isSafeInteger(started)) fail();
-    let calls=0;
+    let calls=0, stopped=false;
     async function call(fn,...args) {
-      if(typeof fn!=='function' || ++calls>maxCalls || now()-started>maxDurationMs) fail();
-      const result=await fn(...args); ok(result);
-      if(now()-started>maxDurationMs) fail();
-      return result;
+      try {
+        if(stopped || typeof fn!=='function' || ++calls>maxCalls || now()-started>maxDurationMs) fail();
+        const result=await fn(...args); ok(result);
+        if(now()-started>maxDurationMs) fail();
+        return result;
+      } catch { stopped=true; fail(); }
+    }
+    async function bounded(items,work) {
+      let next=0;
+      const results=new Array(items.length);
+      await Promise.all(Array.from({length:Math.min(concurrency,items.length)},async()=>{
+        while(!stopped && next<items.length) {
+          const index=next++;
+          try { results[index]=await work(items[index]); }
+          catch { stopped=true; }
+        }
+      })); // Drain in-flight reads before rejecting; never return partial results.
+      if(stopped) fail();
+      return results;
     }
     async function detail(txId) {
       const response=await call(provider.getTransactionDetails,txId);
@@ -99,35 +124,41 @@ async function readRefundProviderHistory(operation, {
     const pendingBefore=await pages(provider.getUnsettledTransactionList);
     const batches=await inventory(started);
     const transactions=new Map();
-    for(const batchId of batches.keys()) {
+    await bounded([...batches.keys()],async batchId=>{
       for(const row of await pages(paging=>provider.getTransactionListForBatch(batchId,paging))) {
         if(transactions.has(row.transId)) fail();
         transactions.set(row.transId,row);
       }
-    }
+    });
+    const pendingIds=new Set(pendingBefore.map(row=>row.transId));
     for(const row of pendingBefore) {
       if(transactions.has(row.transId)) fail(); // settlement moved during scan
       transactions.set(row.transId,row);
     }
     const refunds=[]; let used=0n; let uncertain=false;
-    for(const txId of transactions.keys()) {
-      const tx=await detail(txId);
+    const inspected=await bounded([...transactions.values()],async row=>{
+      if(!pendingIds.has(row.transId) && settledChargeSummary(row)) return null;
+      const tx=await detail(row.transId);
       if(tx.transactionType!=='refundTransaction') {
         if(!['authCaptureTransaction','authOnlyTransaction','priorAuthCaptureTransaction','captureOnlyTransaction','voidTransaction'].includes(tx.transactionType) ||
             /refund|credit/i.test(tx.transactionStatus||'')) fail();
-        continue;
+        return null;
       }
       const ref=tx.refTransId ?? tx.refTransID;
       if(!id(ref)) fail(); // unlinked credit cannot be assigned safely
-      if(ref!==operation.transactionId) continue;
-      if(tx.transactionStatus==='voided') continue; // confirmed void retains no capacity
+      if(ref!==operation.transactionId) return null;
+      if(tx.transactionStatus==='voided') return null; // confirmed void retains no capacity
       if(tx.currencyCode && tx.currencyCode!==operation.currency) fail();
       const amount=minorUnits(tx.settleAmount ?? tx.authAmount);
       if(amount<=0n) fail();
       const succeeded=tx.transactionStatus==='refundSettledSuccessfully';
-      if(!succeeded) uncertain=true; // pending, failed or unfamiliar states require review
-      used+=amount;
-      refunds.push({providerRefundId:txId,amount:decimalAmount(amount),state:succeeded?'succeeded':'needs_reconciliation'});
+      return {providerRefundId:row.transId,amount:decimalAmount(amount),state:succeeded?'succeeded':'needs_reconciliation'};
+    });
+    for(const refund of inspected) {
+      if(!refund) continue;
+      if(refund.state!=='succeeded') uncertain=true;
+      used+=minorUnits(refund.amount);
+      refunds.push(refund);
     }
     const pendingAfter=await pages(provider.getUnsettledTransactionList);
     if(fingerprint(pendingBefore)!==fingerprint(pendingAfter)) fail();

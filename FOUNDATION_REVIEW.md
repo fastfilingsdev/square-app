@@ -29,7 +29,22 @@ separates verified candidate behavior from remaining production release gates.
 - The daily cron candidate makes one fixed-endpoint POST per invocation, with
   explicit safe ARB flags, no redirect and no automatic retry.
 
-### Latest reviewed correction
+### Provider-history performance correction
+
+Authenticated read-only verification exposed a sequential-scan deadline failure.
+The collector now limits parallel reads to four, stops scheduling after failure,
+and drains in-flight reads before rejecting. All batch pages remain enumerated.
+Only positive, explicit `settledSuccessfully` summaries in settled batches, with
+no credit-reference or conflicting type, avoid redundant details. Every refund,
+pending, unknown, missing or contradictory summary still gets details. Exact
+reference matching, inventory rechecks, 25-second deadline and 30-second evidence
+freshness remain unchanged. No cached/partial balance or stale timestamp fallback.
+
+Six added regressions cover classification, pending records, concurrency/failure
+drain and 11,600 settled charges plus a linked refund. A fresh provider retest is
+required for this version; local performance evidence alone is not sign-off.
+
+### Prior reviewed correction
 
 Native testing observed a 404 when retrieving a Google ContentService output
 URL; the cause was not established. `readGoogleSyncOutput` allows one retry of
@@ -43,7 +58,7 @@ It never retries the signed POST, other statuses, or transport errors. Persisten
 
 ### Repository regressions
 
-434 tests passed locally with networking denied, zero failures or skipped tests:
+440 tests passed locally with networking denied, zero failures or skipped tests:
 
 ```sh
 node --require ./test/noNetwork.cjs --test test/*.test.js
