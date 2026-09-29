@@ -93,6 +93,14 @@ function ffSqSyncExecute_(toStates) {
       states[state] = sheet; stateValues[state] = sheet.getDataRange().getValues();
     });
     const changes = ffSqSyncPlan_(conValues, cfgValues, sqValues, stateValues, toStates);
+    // setValue/appendRow interpret leading '=' as a formula, including when
+    // getValues returned literal text from the source. Reject the entire batch
+    // before writing rather than silently converting customer data into code.
+    changes.forEach(function (change) {
+      change.cells.forEach(function (cell) {
+        if (typeof cell.value === 'string' && /^\s*=/.test(cell.value)) throw new Error('Sync source contains formula-like text; review before sync.');
+      });
+    });
     // Detect changes since planning before first mutation. Apps Script locks do
     // not lock manual edits or the backend; native rollout still needs controls.
     [[con, conValues], [cfg, cfgValues], [sq, sqValues]].concat(Object.keys(states).map(function (state) { return [states[state], stateValues[state]]; })).forEach(function (pair) {

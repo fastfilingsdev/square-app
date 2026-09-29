@@ -52,6 +52,76 @@ test('executor completes with explicit acknowledgement and releases lock; writes
 test('busy executor throws instead of falsely acknowledging success',()=>{
   const f=fixture();f.ctx.LockService={getScriptLock:()=>({tryLock:()=>false})};assert.throws(()=>f.ctx.syncConnectedCustomersToSQ(),/busy/);
 });
+
+// Separate workbook adapters return snapshots, as getValues does in Google.
+// These exercise routing/fail-closed behavior, not native Drive permissions.
+function multiWorkbookFixture(options={}) {
+  const f=fixture(), writes=[], opened=[];let released=0;
+  f.cfg[1][1]='synthetic-az';
+  f.cfg.push(['CA','synthetic-ca','Customers','yes']);
+  f.con.push(['CA-2','M2','Yes']);
+  f.states.CA=[[],f.states.AZ[1].slice(),['CA-2','No','California synthetic','Biz','Quarterly','Active','']];
+  f.sq.push(['CA-2','M2','CA','Old CA','Biz','Quarterly','Active','Yes','date','stamp','note','keep']);
+  function sheet(key,values){let reads=0;return {
+    getDataRange:()=>({getValues:()=>{
+      reads++; if(reads===2 && options.drift===key)values.at(-1)[2]='concurrent edit';
+      return structuredClone(values);
+    }}),
+    getRange:(r,c)=>({getValue:()=>values[r-1][c-1],getFormula:()=>options.formula===key && c===4?'=1+1':'',setValue:v=>{writes.push({key,r,c});values[r-1][c-1]=v;}}),
+    appendRow:row=>{writes.push({key,append:true});values.push(row);}
+  };}
+  const locals={Connections:sheet('connections',f.con),'Config - States':sheet('config',f.cfg),Customers:sheet('sq',f.sq)};
+  const remote={'synthetic-az':sheet('az',f.states.AZ),'synthetic-ca':sheet('ca',f.states.CA)};
+  f.ctx.SpreadsheetApp={getActiveSpreadsheet:()=>({getSheetByName:n=>locals[n]}),openById:id=>{
+    opened.push(id); if(options.denied===id)throw Error('Permission denied');
+    assert.ok(remote[id],'Only fixture workbooks may open');
+    return {getSheetByName:n=>options.missing===id?null:(n==='Customers'?remote[id]:null)};
+  }};
+  f.ctx.LockService={getScriptLock:()=>({tryLock:()=>true,releaseLock:()=>released++})};
+  return {...f,writes,opened,released:()=>released};
+}
+test('separate state workbook routing cannot write platform fields to the wrong book',()=>{
+  const f=multiWorkbookFixture();assert.equal(f.ctx.syncConnectionsToStates().customers,2);
+  assert.deepEqual(f.opened,['synthetic-az','synthetic-ca']);
+  assert.deepEqual(f.writes.map(w=>w.key),['az','az','ca','ca']);
+  assert.equal(f.states.AZ[2][0],'AZ-1');assert.equal(f.states.CA[2][0],'CA-2');
+  assert.equal(f.states.CA[2][1],'Yes');assert.equal(f.states.CA[2][6],'Square');assert.equal(f.released(),1);
+});
+for(const fault of ['denied','missing'])test('second workbook '+fault+' fails before any writes and releases lock',()=>{
+  const f=multiWorkbookFixture({[fault]:'synthetic-ca'});
+  assert.throws(()=>f.ctx.syncConnectionsToStates(),fault==='denied'?/Permission denied/:/Missing state/);
+  assert.equal(f.writes.length,0);assert.equal(f.released(),1);
+});
+for(const drift of ['connections','config','sq','ca'])test(drift+' snapshot drift aborts before any workbook mutation',()=>{
+  const f=multiWorkbookFixture({drift});assert.throws(()=>f.ctx.syncConnectedCustomersToSQ(),/inputs changed/);
+  assert.equal(f.writes.length,0);assert.equal(f.released(),1);
+});
+test('formula in existing customer targets prevents all customer writes across books',()=>{
+  const f=multiWorkbookFixture({formula:'sq'});assert.throws(()=>f.ctx.syncConnectedCustomersToSQ(),/formula/);
+  assert.equal(f.writes.length,0);assert.equal(f.released(),1);
+});
+test('new customers from separate books append with distinct merchant identities and no filing stamps',()=>{
+  const f=multiWorkbookFixture();f.sq.splice(3);
+  assert.equal(f.ctx.syncConnectedCustomersToSQ().customers,2);
+  assert.deepEqual(f.sq.slice(3).map(r=>[r[0],r[1],r[2]]),[['AZ-1','M1','AZ'],['CA-2','M2','CA']]);
+  for(const row of f.sq.slice(3)){assert.equal(row[9],'');assert.equal(row[10],'');assert.ok(row[8]);}
+  assert.equal(f.writes.length,2);assert.equal(f.released(),1);
+});
+for(const append of [false,true]) for(const field of [2,3,4,5]) test('formula-like state field '+field+' rejects all writes (append='+append+')',()=>{
+  const f=multiWorkbookFixture();if(append)f.sq.splice(3);
+  f.states.CA[2][field]='=1+1';
+  assert.throws(()=>f.ctx.syncConnectedCustomersToSQ(),/formula-like/);
+  assert.equal(f.writes.length,0);assert.equal(f.released(),1);
+});
+test('formula-like merchant identity rejects the full batch before updates',()=>{
+  const f=multiWorkbookFixture();f.sq.splice(3);f.con[2][1]='=1+1';
+  assert.throws(()=>f.ctx.syncConnectedCustomersToSQ(),/formula-like/);
+  assert.equal(f.writes.length,0);assert.equal(f.released(),1);
+});
+test('ordinary punctuation in names remains unchanged',()=>{
+  const f=multiWorkbookFixture();f.states.CA[2][2]='A=B Cleaning';
+  assert.equal(f.ctx.syncConnectedCustomersToSQ().success,true);assert.equal(f.sq[4][3],'A=B Cleaning');
+});
 test('signed backend request runs actual consolidated job; replay cannot write again',async()=>{
   const crypto=require('node:crypto');
   const {triggerSqCustomerSync}=require('../src/core/sqCustomerSync');
