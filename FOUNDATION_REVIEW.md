@@ -44,8 +44,16 @@ reference matching, inventory rechecks, 25-second deadline and 30-second evidenc
 freshness remain unchanged. No cached/partial balance or stale timestamp fallback.
 
 Eight added regressions cover classification, pending records, concurrency/failure
-drain and 11,600 mixed charge/decline/void summaries plus a linked refund. A fresh provider retest is
-required for this version; local performance evidence alone is not sign-off.
+drain and 11,600 mixed charge/decline/void summaries plus a linked refund.
+
+Authenticated reporting-only retest of source commit `d872ac3` PASSED: complete
+history in 13,614ms under the unchanged 25-second deadline, 219 reporting reads,
+peak concurrency four, both inventory rechecks, exact historical linked refund
+included and zero remaining refundable balance for the designated original.
+Source hashes were checked before execution. No application bootstrap, database
+write, financial request, email, production deployment or configuration change.
+This proves this historical reporting case, not actual refund dispatch, pending
+refund execution or an atomic lock against direct merchant-dashboard refunds.
 
 ### Prior reviewed correction
 
