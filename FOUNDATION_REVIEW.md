@@ -4,6 +4,49 @@ Do not merge or deploy this branch yet. No migration runs at startup. A draft
 pull request is not a sandbox, and this change deliberately disables refunds
 without the required server-owned persistence configuration.
 
+## Current closure checkpoint
+
+- 431 repository regressions pass locally with networking denied, including 19
+  new daily-cron transport and actual-router compatibility cases.
+- The rotated ledger credential passed all 14 read-only connection/permission
+  checks from the backend host. This supersedes the older post-rotation caveat
+  below, but is not proof that the credential is saved in application settings.
+- Separate native Google tests passed the formula-input guard and sync between
+  two actual synthetic workbooks with reversed customer rows and preserved notes.
+  Those supersede older single-workbook limitations below. Deployed signed HTTP,
+  redirects and persistent replay storage remain unverified and deferred.
+- Saved and runtime backend configuration inspections found no new ledger or
+  signed-callback settings. The original release remains active. The backend's
+  primary and fallback admin tokens match; the cron's own token remains unverified.
+
+### Candidate daily cron cutover (not applied)
+
+`scripts/authnet-new-orders-cron.js` replaces the current inline curl command only
+after deployment review. Keep the existing UTC schedule `30 13,14 * * *`; the
+script selects 06:30 America/Los_Angeles in either daylight or standard time.
+It uses the same fixed API endpoint and admin-token precedence as the router,
+explicitly requests dry-run ARB mode, and sends at most one request per invocation.
+It does not follow redirects, retry HTTP errors, or retry ambiguous timeouts.
+Unconfirmed responses exit 2 and require reconciliation. Response bodies are
+bounded and never copied to logs. It does not import server.js or start timers/jobs.
+
+This is not a durable daily-run claim: another invocation or another writer can
+still dispatch. Review the backend's embedded new-orders timer and manual callers
+when choosing the authoritative scheduler. Do not trigger a live apply job to test
+the new command. No live cron settings or schedule were changed by this patch.
+
+### Configuration preparation gates
+
+Save the dedicated ledger URL together with an account-bound provider scope,
+explicit partial mode, USD currency and reviewed TLS policy. Do not use the
+diagnostic scope as the production account identity. Do not enable history or
+policy attestations without completing their provider/reconciliation checks.
+Keep refunds explicitly disabled while staging the configuration. The candidate
+uses `FF_BILLING_REFUNDS_DISABLED`; do not rely on the legacy-looking
+`FF_BILLING_REFUNDS_LIVE_ENABLED` key as its emergency-disable control.
+Owner credential entry must be private. Save-only preparation and actual runtime
+activation are separate operations; do not deploy solely to verify configuration.
+
 ## Proposed changes
 
 - Paired sales-tax callers: authenticated POST import, signed timestamp/nonce
