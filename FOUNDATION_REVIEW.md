@@ -1,151 +1,143 @@
-# Foundation repairs — draft review only
+# Foundation repairs — code review checkpoint
 
-Do not merge or deploy this branch yet. No migration runs at startup. A draft
-pull request is not a sandbox, and this change deliberately disables refunds
-without the required server-owned persistence configuration.
+Reviewed 29 September 2026. Keep this PR draft: code review is not approval to
+merge, deploy, enable financial actions, or replay jobs. Both the API and a
+scheduled service track main. No migration runs automatically at startup.
 
-## Current closure checkpoint
+This document replaces the older, contradictory pending-test statements. It
+separates verified candidate behavior from remaining production release gates.
 
-- 431 repository regressions pass locally with networking denied, including 19
-  new daily-cron transport and actual-router compatibility cases.
-- The rotated ledger credential passed all 14 read-only connection/permission
-  checks from the backend host. This supersedes the older post-rotation caveat
-  below, but is not proof that the credential is saved in application settings.
-- Separate native Google tests passed the formula-input guard and sync between
-  two actual synthetic workbooks with reversed customer rows and preserved notes.
-  Those supersede older single-workbook limitations below. Deployed signed HTTP,
-  redirects and persistent replay storage remain unverified and deferred.
-- Saved and runtime backend configuration inspections found no new ledger or
-  signed-callback settings. The original release remains active. The backend's
-  primary and fallback admin tokens match; the cron's own token remains unverified.
+## Changes included in this PR
 
-### Candidate daily cron cutover (not applied)
+- Reporting routes require admin authentication; sheet mutation uses POST.
+  Fixed-loopback callers carry the configured token. Debug credential fragments
+  and caller-selected Clover destinations are removed; unauthorized payment-link
+  requests return 401. Existing billing Google OAuth access is retained.
+- Filing imports validate schema, customer/merchant identity, formulas, merges
+  and workflow locks before one scoped Sheets batch. Unrelated review rows,
+  filing controls and notes remain outside the write. Ambiguous write outcomes
+  require reconciliation, not an automatic retry.
+- Refunds use exact cents, linked original-payment IDs, durable ownership claims,
+  stable request UUIDs, cumulative partial-refund budgets and function-only DB
+  privileges. Uncertain results retain reservations and block further dispatch.
+- Settled and pending provider-history collection fails closed on incomplete,
+  changing or ambiguous evidence. Serving bootstrap requires explicit partial
+  mode; the legacy single-claim adapter is isolated-test-only.
+- Paired sales-tax Apps Script candidates provide authenticated import, preserved
+  customer metadata and signed timestamp/nonce sync with persistent replay
+  rejection. These repository files are not automatically installed in Google.
+- The daily cron candidate makes one fixed-endpoint POST per invocation, with
+  explicit safe ARB flags, no redirect and no automatic retry.
 
-`scripts/authnet-new-orders-cron.js` replaces the current inline curl command only
-after deployment review. Keep the existing UTC schedule `30 13,14 * * *`; the
-script selects 06:30 America/Los_Angeles in either daylight or standard time.
-It uses the same fixed API endpoint and admin-token precedence as the router,
-explicitly requests dry-run ARB mode, and sends at most one request per invocation.
-It does not follow redirects, retry HTTP errors, or retry ambiguous timeouts.
-Unconfirmed responses exit 2 and require reconciliation. Response bodies are
-bounded and never copied to logs. It does not import server.js or start timers/jobs.
+### Latest reviewed correction
 
-This is not a durable daily-run claim: another invocation or another writer can
-still dispatch. Review the backend's embedded new-orders timer and manual callers
-when choosing the authoritative scheduler. Do not trigger a live apply job to test
-the new command. No live cron settings or schedule were changed by this patch.
+Native testing observed a 404 when retrieving a Google ContentService output
+URL; the cause was not established. `readGoogleSyncOutput` allows one retry of
+the **same read-only GET**, after one second, only for HTTP 404. It enforces the
+exact Google HTTPS output origin and `/macros/echo` path, rejects URL credentials
+and fragments, and neither forwards the signed body nor follows another redirect.
+It never retries the signed POST, other statuses, or transport errors. Persistent
+404 remains unconfirmed. Three added regressions exercise these boundaries.
 
-### Configuration preparation gates
+## Verified evidence
 
-Save the dedicated ledger URL together with an account-bound provider scope,
-explicit partial mode, USD currency and reviewed TLS policy. Do not use the
-diagnostic scope as the production account identity. Do not enable history or
-policy attestations without completing their provider/reconciliation checks.
-Keep refunds explicitly disabled while staging the configuration. The candidate
-uses `FF_BILLING_REFUNDS_DISABLED`; do not rely on the legacy-looking
-`FF_BILLING_REFUNDS_LIVE_ENABLED` key as its emergency-disable control.
-Owner credential entry must be private. Save-only preparation and actual runtime
-activation are separate operations; do not deploy solely to verify configuration.
+### Repository regressions
 
-## Proposed changes
-
-- Paired sales-tax callers: authenticated POST import, signed timestamp/nonce
-  connection sync, and consolidated Apps Script identity checks. Candidate sources
-  are in integrations/sales-tax; these are NOT automatically installed in Google.
-  Both ends require coordinated rollout. Keep the webhook disabled until tested.
-
-### Sales-tax verification update
-
-43 additional repository tests cover caller contracts, signed-request rejection,
-replay/storage limits and consolidated sync behavior. A separate isolated Google
-test passed customer/state sync, protected-field preservation and duplicate-ID
-rejection using synthetic data only. It used one fixture workbook for both sides;
-it did not test deployed webhook redirects/authentication, cross-workbook access,
-new-row append or timed triggers. Manual/backend edit races remain a rollout gate.
-Do not mistake local mocked tests or this bounded native pass for production approval.
-
-Installation replaces the old import file with 02_Sales_Data_Import.gs; replaces
-all three old state/customer sync files with 04_ConnectionsSync.gs; and replaces
-the old webhook with 07_Webhook.gs. Do not append duplicate globals. A dedicated
-SQ_CUSTOMER_SYNC_SECRET must match backend and Script Properties; never reuse
-billing credentials. The webhook defaults off. No secrets or private native fixture
-identifiers are included here. Existing notes and filing stamps are preserved;
-ambiguous identities stop the sync for reconciliation instead of choosing a row.
-
-### Other foundation changes
-
-- Require admin authentication on reporting routes and fixed-loopback calls;
-  reject GET sheet mutations, debug configuration disclosure and caller-chosen
-  Clover destinations. Return 401 explicitly for unauthorized payment links.
-- Preserve filing controls and unrelated review rows; validate schema, formulas,
-  merges and customer/merchant identity before a single Google Sheets batch.
-  Unknown write outcomes require reconciliation, never blind retries.
-- Validate refund amounts in exact cents and approved provider receipt IDs.
-  Durable claims precede provider dispatch; uncertain results retain capacity.
-- Support stable UUID partial-refund requests, cumulative budgets and a
-  function-only serving role. Missing or disabled historical budgets fail closed.
-- Add bounded settled/pending provider-history collection and server bootstrap
-  wiring, disabled by default. Provider-account/policy drift blocks dispatch.
-
-## Verification and limits
-
-Run backend regressions with outbound networking denied:
+434 tests passed locally with networking denied, zero failures or skipped tests:
 
 ```sh
 node --require ./test/noNetwork.cjs --test test/*.test.js
 ```
 
-Private isolated PostgreSQL 18.4 testing separately passed core durability,
-partial-budget concurrency/crash recovery, and function-only permission checks.
-Those tests do not establish the actual deployment's role-transfer permissions,
-pool/TLS connectivity or provider account policy. Private fixtures and reports
-are intentionally excluded from this public repository.
+These include actual-router caller contracts, identity/schema/formula safeguards,
+uncertain writes, refund ownership/budgets, history validation, role restrictions,
+signed requests/replay and one-attempt cron behavior. This is local test evidence,
+not a GitHub CI pass. No GitHub review submissions, inline review threads or
+commit status checks were present at the start of this review. No PR-triggered
+workflow runs were returned by the connector.
 
-An operator-approved dedicated database migration has separately passed a
-rollback rehearsal and committed verification under a PostgreSQL 18 non-superuser
-administrator. Migration 003 temporarily enables executor SET/INHERIT for the
-migration owner, then removes those capabilities before commit. Serving-role
-table access is not granted. This does not establish application pool readiness.
+### Separate native and configuration evidence
 
-`inspectRefundLedgerConnection` in `src/core/refundLedgerPreflight.js` is an
-explicit operator-only diagnostic, not a startup hook or HTTP endpoint. It uses
-the application pool configuration with one connection and a read-only
-transaction to check TLS, durability, role attributes and required privileges.
-It never calls the financial functions or reads customer/ledger records, and
-sanitizes driver errors. Its mocked regressions are separate from an approved
-temporary-container run using pg 8.23.0 and the same pool configuration function:
-all 14 read-only checks passed against the dedicated database, with no financial
-function calls. The explicit Render-internal TLS mode encrypts traffic but does
-not verify certificate identity; this is not verify-full evidence. This probe
-does not establish deployed server wiring, provider behavior, or post-rotation
-credential authentication. Temporary dependencies were kept outside application
-files. Do not expose the database externally merely to run diagnostics.
+- Isolated PostgreSQL 18.4 suites passed durability, concurrent partial-budget
+  limits, immediate-stop recovery and function-only serving permissions.
+- An approved dedicated migration passed rollback rehearsal and committed role
+  checks under a non-superuser administrator. Do not replay these migrations.
+- The rotated database credential passed all 14 read-only connection/permission
+  checks from the backend host. No financial functions or customer rows were used.
+- Saved application ledger settings were subsequently verified, including the
+  restricted connection URL and disabled financial/history controls. Save-only
+  verification is not proof that the candidate is active in production.
+- Backend primary/fallback token alignment and the daily cron token alignment
+  were separately verified without publishing their values.
+- Native Google tests passed the formula-input safeguard and sync between two
+  separate synthetic workbooks, including reversed row order and preserved notes
+  and filing stamps.
+- The actual Node signed caller passed against a temporary deployed synthetic
+  Google endpoint: signed request accepted, ContentService redirect retrieved,
+  exact replay rejected. The temporary deployment was archived afterward.
+  The final result does not establish whether its 404 retry branch was exercised;
+  that branch is proven by the local regressions above.
+- A private production billing adapter candidate passed 31 isolated regressions
+  and six native synthetic Google cases, including receipt identity, preserved
+  email markers and reconciliation on uncertainty. Its install manifest remains
+  a separate private rollout artifact, not code shipped by this repository.
 
-## Merge blockers
+Native fixtures, operational reports, workbook IDs and credentials are excluded
+from this public repository. These checks made no real payments, refunds or
+customer emails. Agent review is not independent reviewer approval or a claim
+that the full foundation has shipped.
 
-1. Complete external caller migration and full native route tests. The single
-   Sheets batch is not a transaction around preflight reads; manual/API edits
-   and ambiguous retries still require an approved concurrency/recovery design.
-2. Complete deployed application wiring and verify its final credentials and
-   configuration. Dedicated schema/grants and the isolated Node connection probe
-   are verified, not an end-to-end deployment. Do not replay applied migrations
-   or grant direct serving-role writes to bypass permission errors.
-3. Reconcile historical refunds before enabling per-charge budgets. Verify
-   linked-refund enforcement and exclusion of standalone credits on the actual
-   provider account. A snapshot alone does not fence external refund writers.
-4. Complete Authorize.Net sandbox response/history testing and production
-   caller UUID/receipt handling. Do not use real payments as a substitute.
-5. Review rollout and rollback for both API and scheduled workers that track
-   main. Keep live refunds disabled until all gates pass; never replay financial
-   or historical email jobs to validate deployment.
+## Paired caller installation
 
-History wiring requires explicit `FF_REFUND_HISTORY_ENABLED=true`, partial ledger
-mode, USD, dedicated ledger configuration and both policy attestations. These
-flags record operator verification; setting them does not perform verification.
-The serving bootstrap rejects legacy single-claim mode (including an omitted
-mode with ledger configuration). It remains an isolated test adapter only and
-cannot be used to bypass the approved partial-refund/history requirements.
+Install only during an approved, coordinated cutover:
 
-Remaining credential migration, wider authorization findings and all state-sheet
-rollouts are separate scope; this draft does not claim the entire foundation is
-finished. No customer data, private sheet identifiers or credentials are added.
+1. Replace the old import with `integrations/sales-tax/02_Sales_Data_Import.gs`.
+   Its POST retains query parameters and uses `FF_SYNC_ADMIN_TOKEN` from Script
+   Properties. It does not stamp a remembered local customer row.
+2. Replace all old state/customer sync definitions (04/05/06) together with
+   `04_ConnectionsSync.gs`; do not append duplicate globals. Preserve verified
+   header/configuration bindings and backups outside the active source.
+3. Replace the webhook with `07_Webhook.gs`. Its dedicated
+   `SQ_CUSTOMER_SYNC_SECRET` must match the backend; never reuse billing secrets.
+   Keep it disabled until the reviewed production target and caller are ready.
+4. Install the separately reviewed private billing adapter with persistent
+   request IDs and journal handling; retain the existing token/OAuth access
+   contract. Verify the real executor, allowlist and scopes at rollout.
+
+## Existing release gates — not new code-review tasks
+
+1. **Provider verification (completion checklist Step 3).** Finish the remaining
+   Authorize.Net response/history and account-policy checks. Initialize budgets
+   only after reconciling captured amounts and historical refunds. Staff use
+   Refund on the original payment, not unlinked credits. A history snapshot does
+   not prevent a concurrent manual/provider refund; actual linked-refund
+   enforcement and external-writer controls must be established before enabling.
+2. **Paired rollout (Step 5).** Verify backups, rollback, production caller
+   installation/authentication, saved-to-runtime configuration activation and
+   deployment order. Resolve existing manual/API Sheet-write coordination:
+   preflight plus a batch is not a transactional lock; Apps Script locks do not
+   fence manual edits or backend writers. Multi-workbook writes can partially
+   complete and require reconciliation. Do not enable competing writers until
+   their maintenance/recovery controls are established.
+3. **Scheduler ownership (Step 5).** The daily cron and embedded 15-minute
+   subscription processor are not behaviorally equivalent. Preserve current
+   behavior until an owner decision and coverage check establish the authoritative
+   scheduler. The one-attempt cron is not cross-invocation idempotency. If adopted,
+   keep schedule `30 13,14 * * *`; its script selects 06:30 America/Los_Angeles.
+   Inspect platform/operator retry settings; do not test by running a live job.
+4. **Production verification (Step 6).** Verify actual installed caller behavior,
+   all seven states, billing customer isolation/email markers and stop-work notes
+   under the approved rollout plan. Candidate tests do not close this gate.
+
+Keep `FF_BILLING_REFUNDS_DISABLED=true` and `FF_REFUND_HISTORY_ENABLED=false`
+until the financial gates are explicitly satisfied. Do not use
+`FF_BILLING_REFUNDS_LIVE_ENABLED` as the emergency-disable control. History
+enablement additionally requires partial mode, USD, the dedicated ledger and
+both policy attestations; setting those flags does not perform verification.
+
+The explicit Render-internal TLS mode encrypts the connection but does not
+verify certificate identity. It is not verify-full evidence. Never expose the
+database externally or grant direct serving-role table writes to bypass a test.
+
+No production merge, deployment, caller installation, real financial operation
+or historical job replay is authorized by this review checkpoint.
