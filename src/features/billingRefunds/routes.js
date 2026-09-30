@@ -3,6 +3,7 @@ const express = require('express');
 const { buildRefundDryRun, lookupRefundCandidates, FF_BILLING_SPREADSHEET_ID, FF_SUBSCRIPTIONS_SPREADSHEET_ID } = require('./refundLookup');
 const { liveRefundsEnabled } = require('./refundProcess');
 const { createGuardedRefundProcessor } = require('./refundGuard');
+const { hasValidAdminToken } = require('../../core/adminAccess');
 
 function bearerToken(req) {
   const auth = String(req.get('authorization') || '').trim();
@@ -10,11 +11,7 @@ function bearerToken(req) {
 }
 
 function hasValidSyncToken(req) {
-  const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
-  if (!expected) return false;
-  const headerToken = String(req.get('x-ff-sync-token') || req.get('x-authnet-sync-token') || '').trim();
-  const bearer = bearerToken(req);
-  return headerToken === expected || bearer === expected;
+  return hasValidAdminToken(req);
 }
 
 function allowedRefundGoogleEmails() {
@@ -27,7 +24,8 @@ async function verifyGoogleAccessToken(token) {
   try {
     const response = await axios.get('https://oauth2.googleapis.com/tokeninfo', {
       params: { access_token: token },
-      timeout: 10000
+      timeout: 10000,
+      maxRedirects: 0
     });
     const email = String(response.data?.email || '').trim().toLowerCase();
     const verified = response.data?.email_verified === true || String(response.data?.email_verified || '').toLowerCase() === 'true';
@@ -39,7 +37,7 @@ async function verifyGoogleAccessToken(token) {
       allowed: allowed.has(email)
     };
   } catch (err) {
-    return { ok: false, email: '', error: String(err.message || err).slice(0, 220) };
+    return { ok: false, email: '', error: 'Google authorization could not be verified' };
   }
 }
 
@@ -62,6 +60,14 @@ function createBillingRefundsRouter({ refundLedger, providerScope, refundCurrenc
   const router = express.Router();
   const processRefund = createGuardedRefundProcessor({ ledger: refundLedger, providerScope, refundCurrency, verifyRefundHistoryFn, refundTransactionFn });
   const providerHistoryConfigured = refundLedger?.requiresRequestId !== true || typeof verifyRefundHistoryFn === 'function';
+
+  // Authentication only: no provider, ledger, spreadsheet or financial handler.
+  // Exact GET path is admitted during maintenance; normal operations stay held.
+  router.get('/refunds/auth-check', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!await requireBillingAccess(req, res)) return;
+    return res.json({ ok: true, authenticated: true, operationStarted: false });
+  });
 
   router.get('/refunds/health', (req, res) => {
     res.json({

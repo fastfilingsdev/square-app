@@ -16,7 +16,8 @@ async function readGoogleSyncOutput({ http, url, delay = ms => new Promise(resol
 }
 
 // Dedicated signing secret, never the reporting/payment admin credential.
-async function triggerSqCustomerSync({ http, env = process.env, now = Date.now, nonce = randomUUID, delay }) {
+async function signedSqRequest({ http, env = process.env, now = Date.now, nonce = randomUUID, delay, action }) {
+  if (!['syncCustomers', 'verifyConnection'].includes(action)) throw new Error('SQ action rejected');
   if (!env.SQ_CUSTOMER_SYNC_URL) return { skipped: true };
   const secret = env.SQ_CUSTOMER_SYNC_SECRET || '';
   if (secret.length < 32) throw new Error('SQ sync signing configuration missing');
@@ -24,7 +25,7 @@ async function triggerSqCustomerSync({ http, env = process.env, now = Date.now, 
   if (url.origin !== 'https://script.google.com' || !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname) || url.search || url.hash || url.username || url.password) {
     throw new Error('SQ sync destination rejected');
   }
-  const body = { action: 'syncCustomers', timestamp: now(), nonce: nonce() };
+  const body = { action, timestamp: now(), nonce: nonce() };
   body.signature = createHmac('sha256', secret).update([body.action, body.timestamp, body.nonce].join('\n')).digest('hex');
   try {
     let result = await http.post(url.href, body, { timeout: 15000, maxRedirects: 0, validateStatus: () => true });
@@ -34,10 +35,13 @@ async function triggerSqCustomerSync({ http, env = process.env, now = Date.now, 
       result = await readGoogleSyncOutput({http, url:result.headers?.location, delay});
     }
     if (result.status !== 200 || result.data?.success !== true) throw new Error();
+    if (action === 'verifyConnection' && (result.data.connectionVerified !== true || result.data.customerWrites !== 0)) throw new Error();
     return { success: true };
   } catch (_) {
     // Do not print axios errors: they contain the signed body and output URL.
     throw new Error('SQ sync outcome unconfirmed; reconcile before rerun');
   }
 }
-module.exports = { triggerSqCustomerSync, readGoogleSyncOutput };
+function triggerSqCustomerSync(options) { return signedSqRequest({ ...options, action: 'syncCustomers' }); }
+function verifySqConnection(options) { return signedSqRequest({ ...options, action: 'verifyConnection' }); }
+module.exports = { triggerSqCustomerSync, verifySqConnection, readGoogleSyncOutput };

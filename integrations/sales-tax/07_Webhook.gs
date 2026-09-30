@@ -5,11 +5,11 @@ function doPost(e) {
   let lock;
   try {
     const properties = PropertiesService.getScriptProperties();
-    if (properties.getProperty('SQ_CUSTOMER_SYNC_ENABLED') !== 'true') throw new Error();
     const secret = properties.getProperty('SQ_CUSTOMER_SYNC_SECRET') || '';
     if (secret.length < 32 || !e || !e.postData || e.postData.contents.length > 2048) throw new Error();
     const body = JSON.parse(e.postData.contents);
-    if (body.action !== 'syncCustomers' || !Number.isSafeInteger(body.timestamp) || Math.abs(Date.now() - body.timestamp) > 60000 || typeof body.nonce !== 'string' || typeof body.signature !== 'string' || !/^[a-f0-9-]{36}$/.test(body.nonce) || !/^[a-f0-9]{64}$/.test(body.signature)) throw new Error();
+    if (!['syncCustomers', 'verifyConnection'].includes(body.action) || !Number.isSafeInteger(body.timestamp) || Math.abs(Date.now() - body.timestamp) > 60000 || typeof body.nonce !== 'string' || typeof body.signature !== 'string' || !/^[a-f0-9-]{36}$/.test(body.nonce) || !/^[a-f0-9]{64}$/.test(body.signature)) throw new Error();
+    if (body.action === 'syncCustomers' && properties.getProperty('SQ_CUSTOMER_SYNC_ENABLED') !== 'true') throw new Error();
     const signed = [body.action, body.timestamp, body.nonce].join('\n');
     const expected = Utilities.computeHmacSha256Signature(signed, secret).map(function (v) { return ('0' + ((v + 256) % 256).toString(16)).slice(-2); }).join('');
     let difference = 0;
@@ -28,6 +28,8 @@ function doPost(e) {
     // Claim before invoking any writes; a failure leaves the nonce consumed.
     properties.setProperty(key, String(Date.now()));
     lock.releaseLock(); lock = null;
+    // Same authentication/nonce path, but never enter customer-sync code.
+    if (body.action === 'verifyConnection') return ffSqWebhookOutput_({ success: true, connectionVerified: true, customerWrites: 0 });
     const result = syncConnectedCustomersToSQ();
     if (!result || result.success !== true) throw new Error();
     return ffSqWebhookOutput_({ success: true });

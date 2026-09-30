@@ -20,7 +20,7 @@ function createMaintenance({ env = process.env } = {}) {
     return { paused, active, uncertain, drained: paused && active === 0 && uncertain === 0 };
   }
   function pause() { paused = true; return status(); }
-  const health = new Set(['/authnet/health', '/foundation-maintenance/health']);
+  const health = new Set(['/authnet/health', '/foundation-maintenance/health', '/billing/refunds/auth-check']);
   function middleware(req, res, next) {
     if ((req.method === 'GET' || req.method === 'HEAD') && health.has(req.path)) return next();
     const release = enter();

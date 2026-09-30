@@ -45,7 +45,7 @@ test('held mode blocks both mutating GET routes and POST requests before handler
 });
 test('only exact read-only health paths are admitted while paused', () => {
   const m=createMaintenance({env:{FF_FOUNDATION_MAINTENANCE:'true'}});
-  for(const route of ['/authnet/health','/foundation-maintenance/health']) {
+  for(const route of ['/authnet/health','/foundation-maintenance/health','/billing/refunds/auth-check']) {
     let calls=0; m.middleware({method:'GET',path:route},response(),()=>calls++); assert.equal(calls,1);
     calls=0; m.middleware({method:'POST',path:route},response(),()=>calls++); assert.equal(calls,0);
     m.middleware({method:'GET',path:route+'/other'},response(),()=>calls++); assert.equal(calls,0);
