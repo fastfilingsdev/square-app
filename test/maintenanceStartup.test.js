@@ -8,7 +8,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const root = path.resolve(__dirname, '../src');
 const allowed = new Set([
-  'core/maintenance.js',
+  'core/maintenance.js', 'core/subscriptionLedger.js',
   'features/subscriptions/routes.js', 'features/subscriptions/authnetNewOrdersSync.js',
   'features/subscriptions/recoveredActiveSync.js', 'features/authnetWebhook/routes.js',
   'features/authnetWebhook/paymentUpdateBRecovery.js', 'features/authnetWebhook/watchdog.js'
@@ -36,7 +36,7 @@ function fixture(env) {
       setTimeout: schedule('timeout'), setInterval: schedule('interval'),
       clearTimeout: deny, clearInterval: deny,
       require(name) {
-        if (name === 'crypto') return require('node:crypto');
+        if (name === 'crypto' || name === 'node:crypto') return require('node:crypto');
         if (name === 'express') return { Router: deny };
         if (/connectors\/authnet\/client$|core\/googleSheets$/.test(name)) return connector;
         return load(path.resolve(path.dirname(file), name + '.js'));

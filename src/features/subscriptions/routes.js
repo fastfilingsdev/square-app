@@ -46,6 +46,7 @@ const recoveredActiveSyncState = {
 // Shared by the HTTP caller and timer in this process. This is NOT durable
 // idempotency or a cross-instance/Google-writer lock. Keep those rollout gates.
 const newOrdersAdmission = { running: false, needsReconciliation: false };
+let subscriptionOptions = Object.freeze({});
 async function runAdmittedNewOrdersSync(options) {
   if (newOrdersAdmission.running || newOrdersAdmission.needsReconciliation) {
     const error = new Error(newOrdersAdmission.needsReconciliation
@@ -55,7 +56,7 @@ async function runAdmittedNewOrdersSync(options) {
   }
   newOrdersAdmission.running = true;
   try {
-    return await syncAuthNetNewOrders(options);
+    return await syncAuthNetNewOrders({ ...options, ...subscriptionOptions });
   } catch (error) {
     // A provider acceptance followed by a failed sheet write must not be
     // silently retried on the next timer tick. No in-process reset endpoint.
@@ -75,7 +76,9 @@ function hasValidSyncToken(req) {
   return headerToken === expected || bearer === expected;
 }
 
-function createSubscriptionsRouter() {
+function createSubscriptionsRouter(options = {}) {
+  subscriptionOptions = Object.freeze({ subscriptionLedger: options.subscriptionLedger,
+    providerScope: options.providerScope });
   const router = express.Router();
 
   router.get('/authnet/new-orders/sync/health', (req, res) => {
@@ -91,6 +94,7 @@ function createSubscriptionsRouter() {
       arbLiveGateEnabled: isArbAutoCreateEnabled(),
       newOrdersAutoDiscoveryEnabled: isNewOrdersAutoDiscoveryEnabled(),
       admission: { ...newOrdersAdmission, scope: 'process-local' },
+      durableCreationGuardConfigured: Boolean(subscriptionOptions.subscriptionLedger),
       duplicateMembershipGuard: 'same-email-existing-active-or-created-membership-review',
       automation: {
         enabled: isNewOrdersAutomationEnabled(),

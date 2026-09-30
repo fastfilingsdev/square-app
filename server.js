@@ -1457,11 +1457,11 @@ app.get('/clover/callback', async (req, res) => {
 });
 
 app.use('/payment-update', createPaymentUpdateRouter());
-app.use('/subscriptions', createSubscriptionsRouter());
 app.use('/authnet', createAuthNetWebhookRouter());
 app.use('/clover', createCloverHostedCheckoutRouter());
 const refundLedgerRuntime = createRefundServiceRuntime({ env: process.env,
   onPoolError: message => console.error(message) });
+app.use('/subscriptions', createSubscriptionsRouter(refundLedgerRuntime.subscriptionOptions));
 app.use('/billing', createBillingRefundsRouter(refundLedgerRuntime.routerOptions));
 app.use('/billing', createBillingPaymentLinksRouter());
 

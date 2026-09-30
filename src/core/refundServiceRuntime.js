@@ -51,7 +51,8 @@ function createRefundServiceRuntime({env=process.env, onPoolError,
     };
   }
   const ledger=ledgerFactory({env,onPoolError});
-  return Object.freeze({routerOptions:Object.freeze({...ledger.routerOptions,
+  return Object.freeze({subscriptionOptions:ledger.subscriptionOptions,
+    routerOptions:Object.freeze({...ledger.routerOptions,
     ...(verifyRefundHistoryFn ? {verifyRefundHistoryFn,refundTransactionFn:guardedRefundTransaction} : {})}),close:()=>ledger.close()});
 }
 module.exports={createRefundServiceRuntime};

@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { subscriptionFingerprint } = require('../../core/subscriptionLedger');
 const { getSheetsClient } = require('../../core/googleSheets');
 const { authNetPost, getMerchantAuthentication, getSubscription } = require('../../connectors/authnet/client');
 
@@ -1251,7 +1252,7 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
   return { rowUpdates, conversionUpserts, activeInserts: [], onboardingInserts: [], review, skipped, ready, activeIds, onboarding };
 }
 
-async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) {
+async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope }) {
   const results = [];
   if (!arbLiveRequested) {
     plan.conversionUpserts.forEach(item => {
@@ -1282,13 +1283,20 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) {
       continue;
     }
     try {
-      const profileIds = await ensureProfileForTransaction(item.tx);
-      item.fields['Profile Creation Status'] = profileIds.source === 'transactionDetail' ? 'Existing profile on transaction detail' : 'Created from original transaction';
-      const arb = await createArbSubscriptionForOrder({
-        order: item.order,
-        tx: item.tx,
-        profileIds,
-        firstBillingDate: item.firstBillingDate
+      if (!subscriptionLedger) throw new Error('Durable subscription ledger is required');
+      const checked = validateOrderAgainstTransaction(item.order, item.tx);
+      if (!checked.ok) throw new Error('Subscription transaction validation failed');
+      const arb = await subscriptionLedger.execute({
+        providerScope, transactionId: transactionId(item.tx),
+        fingerprint: subscriptionFingerprint({ invoice: transactionInvoice(item.tx),
+          amount: parseAmount(transactionAmount(item.tx)), startDate: item.firstBillingDate,
+          email: transactionEmail(item.tx) }),
+        create: async () => {
+          const profileIds = await ensureProfileForTransaction(item.tx);
+          item.fields['Profile Creation Status'] = profileIds.source === 'transactionDetail' ? 'Existing profile on transaction detail' : 'Created from original transaction';
+          return createArbSubscriptionForOrder({ order: item.order, tx: item.tx,
+            profileIds, firstBillingDate: item.firstBillingDate });
+        }
       });
       markSubscriptionCreatedOnPlan({
         plan,
@@ -1296,22 +1304,11 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) {
         subscriptionId: arb.subscriptionId,
         firstBillingDate: item.firstBillingDate
       });
-      results.push({ rowNumber: item.order.rowNumber, status: 'created', subscriptionId: arb.subscriptionId });
+      results.push({ rowNumber: item.order.rowNumber, status: arb.replayed ? 'replayed-durable-receipt' : 'created', subscriptionId: arb.subscriptionId });
     } catch (err) {
       const reason = safeErrorMessage(err);
-      const duplicate = await resolveDuplicateArbSubscription(reason, item).catch(() => null);
-      if (duplicate?.subscriptionId) {
-        markSubscriptionCreatedOnPlan({
-          plan,
-          item,
-          subscriptionId: duplicate.subscriptionId,
-          firstBillingDate: item.firstBillingDate,
-          rowNote: `ARB subscription ${duplicate.subscriptionId} already existed in Auth.Net and matched this order; treated duplicate response as created.`,
-          conversionNote: `Auth.Net reported duplicate subscription ${duplicate.subscriptionId}; verified existing ARB matches amount/start date and treated as created.`
-        });
-        results.push({ rowNumber: item.order.rowNumber, status: 'duplicate-existing-subscription', subscriptionId: duplicate.subscriptionId });
-        continue;
-      }
+      // A duplicate/timeout is not proof of ownership. Retain the durable hold;
+      // do not adopt a subscription based only on matching amount/start date.
       item.fields['ARB Creation Status'] = `Failed — ${reason}`;
       item.fields.Notes = appendNote(item.fields.Notes, `ARB failed; not routed to onboarding: ${reason}`);
       const rowUpdate = plan.rowUpdates.find(update => update.rowNumber === item.order.rowNumber);
@@ -1467,7 +1464,9 @@ async function syncAuthNetNewOrders({
   lookbackDays = 14,
   maxDetails = 2500,
   arbMode = 'dry-run',
-  allowLiveArb = false
+  allowLiveArb = false,
+  subscriptionLedger,
+  providerScope
 } = {}) {
   const dryRun = String(mode || '').toLowerCase() !== 'apply';
   const arbLiveRequested = String(arbMode || '').toLowerCase() === 'live';
@@ -1476,6 +1475,9 @@ async function syncAuthNetNewOrders({
   const subscriptionsSpreadsheetId = FF_SUBSCRIPTIONS_SPREADSHEET_ID();
   const onboardingSpreadsheetId = FF_ONBOARDING_SPREADSHEET_ID();
   if (!billingSpreadsheetId) throw new Error('Missing FF_BILLING_SPREADSHEET_ID');
+  if (arbLiveEnabled && (!subscriptionLedger || !providerScope || !subscriptionsSpreadsheetId || !onboardingSpreadsheetId)) {
+    throw new Error('Live subscriptions require durable ledger and both membership workbooks');
+  }
 
   const sheets = await getSheetsClient();
   if (!dryRun) {
@@ -1491,8 +1493,8 @@ async function syncAuthNetNewOrders({
   const [newOrderRows, conversionRows, activeRows, onboardingRows, auth] = await Promise.all([
     Promise.resolve(initialNewOrderRows),
     readValues(sheets, billingSpreadsheetId, TABS.subscriptionConversions, 'A:AZ'),
-    subscriptionsSpreadsheetId ? readValues(sheets, subscriptionsSpreadsheetId, TABS.active, 'A:AZ').catch(() => []) : Promise.resolve([]),
-    onboardingSpreadsheetId ? readValues(sheets, onboardingSpreadsheetId, TABS.onboardingEmails, 'A:P').catch(() => []) : Promise.resolve([]),
+    subscriptionsSpreadsheetId ? readValues(sheets, subscriptionsSpreadsheetId, TABS.active, 'A:AZ') : Promise.resolve([]),
+    onboardingSpreadsheetId ? readValues(sheets, onboardingSpreadsheetId, TABS.onboardingEmails, 'A:P') : Promise.resolve([]),
     pullRecentTransactions({ lookbackDays, maxDetails, requiredTransactionIds })
   ]);
 
@@ -1504,7 +1506,7 @@ async function syncAuthNetNewOrders({
 
   const plan = buildPlan({ newOrderRows: plannedNewOrderRows, conversionRows, activeRows, onboardingRows, auth });
   plan.newOrderDiscovery = discovery.discovered;
-  const arbResults = !dryRun ? await maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested }) : [];
+  const arbResults = !dryRun ? await maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope }) : [];
 
   let applyResult = { activeApplied: false, onboardingApplied: false, onboardingNote: '', conversionAppends: 0 };
   if (!dryRun) {
@@ -1590,6 +1592,7 @@ module.exports = {
   newOrdersAutomationLookbackDays,
   newOrdersAutomationMaxDetails,
   __authNetNewOrdersTestHooks: {
+    maybeCreateArbs,
     addDaysDateOnly,
     amountEqual,
     buildConversionFields,
