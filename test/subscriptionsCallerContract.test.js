@@ -16,6 +16,7 @@ function fixture(env = {}, failure) {
     module, process: { env }, console: { log() {}, error() {} },
     setTimeout: forbidden, setInterval: forbidden,
     require(name) {
+      if (name === '../../core/maintenance') return { maintenance: require('../src/core/maintenance').createMaintenance({ env: {} }) };
       if (name === 'express') return { Router: () => router };
       if (name === '../../core/googleSheets') return { getSheetsClient: forbidden };
       if (name === './recoveredActiveSync') return {};

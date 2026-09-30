@@ -1,5 +1,45 @@
 # Foundation repairs — code review checkpoint
 
+## 30 September maintenance increment
+
+The candidate now has process-local admission control for a coordinated cutover.
+`FF_FOUNDATION_MAINTENANCE=true` blocks application requests with HTTP 503 before
+handlers and suppresses startup of all four embedded jobs. An already running
+candidate can be paused one-way by the host's SIGUSR2 signal. Existing HTTP and
+timer work is counted; disconnects, HTTP 5xx and uncaught timer-work errors retain
+an uncertainty count rather than reporting a clean drain. Existing cadence and
+startup behavior are unchanged when the setting is absent.
+
+Only the exact GET/HEAD health routes remain available. The maintenance status
+endpoint requires the existing admin token and includes instance/commit identity.
+There is no HTTP pause/resume endpoint. This is not a distributed lock, provider
+reconciliation, or proof that Google/manual/other-process work has stopped.
+Successful HTTP completion likewise does not prove every business operation
+succeeded: reconcile application/provider journals separately.
+
+**First-install restriction:** the older deployed release has no SIGUSR2 handler.
+Never send this signal to it. A controlled first cutover must first prevent new
+old-release/external work and verify completion; deploying this candidate cannot
+retroactively drain the old instance. Save the maintenance flag before any
+restart. Do not use restart to erase an uncertainty count or as reconciliation.
+Webhook requests are rejected, not queued; verify provider retention/retry and
+external-writer coordination before using maintenance in production. Keep Google
+triggers, manifests and properties unchanged unless separately covered.
+
+Verification: 473 repository tests pass locally with networking denied, including
+20 actual-module startup/timer admission regressions and HTTP/admin/signal/drain
+tests. All external clients and timers are inert in those fixtures. This is an
+agent code-review checkpoint, not independent approval, CI, live drain evidence
+or deployment permission. Production settings/code remain unchanged.
+
+This increment supersedes the old test count below only. The original provider
+and Google evidence retains its original scope. A separate owner-controlled
+linked refund has since been accepted once and durably recorded; final settlement
+is a separate follow-up, not authority to replay it. Scheduler ownership is now
+decided: preserve 15-minute processing and retire daily overlap only at cutover.
+
+## Prior reviewed foundation baseline
+
 Reviewed 29 September 2026. Keep this PR draft: code review is not approval to
 merge, deploy, enable financial actions, or replay jobs. Both the API and a
 scheduled service track main. No migration runs automatically at startup.

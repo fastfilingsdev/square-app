@@ -1,3 +1,4 @@
+const { maintenance } = require('../../core/maintenance');
 const {
   getAuthNetWebhook,
   updateAuthNetWebhook
@@ -141,6 +142,9 @@ async function runWebhookWatchdogOnce({
   }
 
   const webhookId = getWatchdogWebhookId();
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   webhookWatchdogState.running = true;
   webhookWatchdogState.checks += 1;
   webhookWatchdogState.lastRunAtUtc = nowIso();
@@ -187,6 +191,7 @@ async function runWebhookWatchdogOnce({
       watchdog: publicWatchdogState()
     };
   } catch (err) {
+    uncertain = true;
     webhookWatchdogState.lastErrorAtUtc = nowIso();
     webhookWatchdogState.lastError = String(err?.message || err).slice(0, 300);
     webhookWatchdogState.lastAction = 'error';
@@ -194,10 +199,12 @@ async function runWebhookWatchdogOnce({
     return { ok: false, error: webhookWatchdogState.lastError, triggeredBy, watchdog: publicWatchdogState() };
   } finally {
     webhookWatchdogState.running = false;
+    release(uncertain);
   }
 }
 
 function startWebhookWatchdogAutomation({ initialDelayMs = 30000 } = {}) {
+  if (maintenance.status().paused) return webhookWatchdogState;
   if (webhookWatchdogState.started) return webhookWatchdogState;
   if (!isWebhookWatchdogEnabled()) {
     console.log('Auth.Net webhook watchdog disabled by AUTHNET_WEBHOOK_WATCHDOG_ENABLED=false');

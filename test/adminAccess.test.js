@@ -51,10 +51,12 @@ test('fixed-loopback requests obtain configured credentials or fail closed', () 
 
 function loadServerRoutes({ env = {}, axiosGet, google } = {}) {
   const routes = new Map();
+  const signals = new Map(), middlewares = [];
+  const maintenance = require('../src/core/maintenance').createMaintenance({env});
   let externalCalls = 0;
   const forbidden = () => { externalCalls++; throw new Error('External access forbidden in regression tests'); };
   const app = {
-    use() {},
+    use(...args) { middlewares.push(args); },
     get(route, handler) { routes.set('GET ' + route, handler); },
     post(route, handler) { routes.set('POST ' + route, handler); },
     listen() {} // Never start the real server or its scheduled jobs.
@@ -69,7 +71,7 @@ function loadServerRoutes({ env = {}, axiosGet, google } = {}) {
   const features = new Proxy({}, { get: () => () => ({}) });
   const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
   vm.runInNewContext(source, {
-    process: { env }, console: { log() {}, error() {} }, URL, Buffer,
+    process: { env, on(name, fn) { signals.set(name, fn); } }, console: { log() {}, error() {}, warn() {} }, URL, Buffer,
     __dirname: path.join(__dirname, '..'),
     require(name) {
       if (name === 'dotenv') return { config() {} };
@@ -77,14 +79,26 @@ function loadServerRoutes({ env = {}, axiosGet, google } = {}) {
       if (name === 'axios') return { get: axiosGet || forbidden, post: forbidden };
       if (name === 'googleapis') return { google: google || { auth: { GoogleAuth: forbidden }, sheets: forbidden } };
       if (name === './src/core/adminAccess') return core.exports;
+      if (name === './src/core/maintenance') return { maintenance };
       if (['./src/core/filingSyncPreflight', './src/core/filingSyncBatch', './src/core/filingTotals', './src/core/refundServiceRuntime', './src/core/sqCustomerSync'].includes(name)) return require('../' + name);
       if (name.startsWith('./src/features/')) return features;
       if (['crypto', 'path'].includes(name)) return require(name);
       throw new Error('Unexpected test dependency: ' + name);
     }
   });
-  return { routes, externalCalls: () => externalCalls };
+  return { routes, signals, middlewares, maintenance, externalCalls: () => externalCalls };
 }
+
+test('maintenance status uses existing admin auth; host signal pauses admission without external calls', () => {
+  const f=loadServerRoutes({env:{FF_SYNC_ADMIN_TOKEN:'synthetic-only'}});
+  assert.equal(f.middlewares[0][0],f.maintenance.middleware);
+  const denied=response(); f.routes.get('GET /foundation-maintenance/health')(request(),denied);
+  assert.equal(denied.code,401);
+  const release=f.maintenance.enter(); f.signals.get('SIGUSR2')();
+  const res=response();f.routes.get('GET /foundation-maintenance/health')(request({'x-ff-sync-token':'synthetic-only'}),res);
+  assert.equal(res.payload.paused,true);assert.equal(res.payload.drained,false);
+  release();assert.equal(f.maintenance.status().drained,true);assert.equal(f.externalCalls(),0);
+});
 
 for (const [label, env, headers] of [
   ['primary header', { FF_SYNC_ADMIN_TOKEN: 'synthetic-primary' }, { 'x-ff-sync-token': 'synthetic-primary' }],

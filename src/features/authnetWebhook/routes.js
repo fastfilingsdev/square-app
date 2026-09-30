@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { maintenance } = require('../../core/maintenance');
 const express = require('express');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
@@ -425,6 +426,9 @@ async function runBFallbackAutomationOnce(triggeredBy = 'authnet-b-validation-fa
   if (!spreadsheetId) {
     return { ok: false, error: 'spreadsheet_not_configured' };
   }
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   fallbackAutomationState.running = true;
   fallbackAutomationState.lastRunAtUtc = new Date().toISOString();
   try {
@@ -444,16 +448,19 @@ async function runBFallbackAutomationOnce(triggeredBy = 'authnet-b-validation-fa
     console.log('Auth.Net B fallback automation completed', JSON.stringify({ counts: fallbackAutomationState.lastCounts }));
     return result;
   } catch (err) {
+    uncertain = true;
     fallbackAutomationState.lastErrorAtUtc = new Date().toISOString();
     fallbackAutomationState.lastError = String(err?.message || err).slice(0, 300);
     console.error('Auth.Net B fallback automation error:', fallbackAutomationState.lastError);
     return { ok: false, error: fallbackAutomationState.lastError };
   } finally {
     fallbackAutomationState.running = false;
+    release(uncertain);
   }
 }
 
 function startAuthNetBFallbackAutomation({ initialDelayMs = 45000 } = {}) {
+  if (maintenance.status().paused) return fallbackAutomationState;
   if (fallbackAutomationState.started) return fallbackAutomationState;
   if (!isBFallbackAutomationEnabled()) {
     console.log('Auth.Net B fallback automation disabled by AUTHNET_B_FALLBACK_AUTOMATION_ENABLED=false');

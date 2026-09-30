@@ -1,4 +1,5 @@
 const express = require('express');
+const { maintenance } = require('../../core/maintenance');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
   syncAuthNetNewOrders,
@@ -166,6 +167,9 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
   if (automationState.running) {
     return { ok: true, skipped: true, reason: 'automation already running' };
   }
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   automationState.running = true;
   automationState.lastRunAtUtc = new Date().toISOString();
   try {
@@ -184,16 +188,19 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
     console.log('FF Billing New Orders automation completed', JSON.stringify({ counts: automationState.lastCounts, guards: automationState.lastGuards }));
     return result;
   } catch (err) {
+    uncertain = true;
     automationState.lastErrorAtUtc = new Date().toISOString();
     automationState.lastError = String(err?.message || err).slice(0, 300);
     console.error('FF Billing New Orders automation error:', automationState.lastError);
     return { ok: false, error: automationState.lastError };
   } finally {
     automationState.running = false;
+    release(uncertain);
   }
 }
 
 function startNewOrdersAutomation({ initialDelayMs = 30000 } = {}) {
+  if (maintenance.status().paused) return automationState;
   if (automationState.started) return automationState;
   if (!isNewOrdersAutomationEnabled()) {
     console.log('FF Billing New Orders automation disabled by FF_BILLING_NEW_ORDERS_AUTOMATION_ENABLED=false');
@@ -217,6 +224,9 @@ async function runRecoveredActiveSyncAutomationOnce(triggeredBy = 'recovered-act
   if (recoveredActiveSyncState.running) {
     return { ok: true, skipped: true, reason: 'recovered active sync automation already running' };
   }
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   recoveredActiveSyncState.running = true;
   recoveredActiveSyncState.lastRunAtUtc = new Date().toISOString();
   try {
@@ -233,16 +243,19 @@ async function runRecoveredActiveSyncAutomationOnce(triggeredBy = 'recovered-act
     console.log('Recovered Subs → Active sync automation completed', JSON.stringify({ counts: recoveredActiveSyncState.lastCounts }));
     return result;
   } catch (err) {
+    uncertain = true;
     recoveredActiveSyncState.lastErrorAtUtc = new Date().toISOString();
     recoveredActiveSyncState.lastError = String(err?.message || err).slice(0, 300);
     console.error('Recovered Subs → Active sync automation error:', recoveredActiveSyncState.lastError);
     return { ok: false, error: recoveredActiveSyncState.lastError };
   } finally {
     recoveredActiveSyncState.running = false;
+    release(uncertain);
   }
 }
 
 function startRecoveredActiveSyncAutomation({ initialDelayMs = 60000 } = {}) {
+  if (maintenance.status().paused) return recoveredActiveSyncState;
   if (recoveredActiveSyncState.started) return recoveredActiveSyncState;
   if (!isRecoveredActiveSyncEnabled()) {
     console.log('Recovered Subs → Active sync automation disabled by RECOVERED_ACTIVE_SYNC_ENABLED=false');

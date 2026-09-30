@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { google } = require('googleapis');
 const { requireAdminToken, internalAdminHeaders } = require('./src/core/adminAccess');
+const { maintenance } = require('./src/core/maintenance');
 const { triggerSqCustomerSync } = require('./src/core/sqCustomerSync');
 const { readFilingSyncInput } = require('./src/core/filingSyncPreflight');
 const { applyFilingSyncBatch } = require('./src/core/filingSyncBatch');
@@ -37,6 +38,18 @@ const {
 } = require('./src/features/clover/tokenCrypto');
 
 const app = express();
+app.use(maintenance.middleware);
+app.get('/foundation-maintenance/health', (req, res) => {
+  if (!requireAdminToken(req, res)) return;
+  res.set({ 'Cache-Control': 'no-store' }).json({ ok: true, ...maintenance.status(),
+    instanceId: process.env.RENDER_INSTANCE_ID || null, commit: process.env.RENDER_GIT_COMMIT || null });
+});
+// Deliberately one-way: no public HTTP endpoint can resume or pause processing.
+// Only use on a release verified to contain this handler; older Node releases
+// may terminate on SIGUSR2. The saved maintenance flag must precede any restart.
+process.on('SIGUSR2', () => {
+  console.warn('Foundation maintenance requested', JSON.stringify(maintenance.pause()));
+});
 app.use(express.json({
   verify: (req, res, buf) => {
     if (req.originalUrl && (req.originalUrl.startsWith('/authnet/') || req.originalUrl.startsWith('/clover/hosted-checkout/'))) {

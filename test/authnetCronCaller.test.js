@@ -65,6 +65,7 @@ test('actual cron caller reaches actual subscription router with safe options', 
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/features/subscriptions/routes.js'), 'utf8'), {
     module, process: { env }, console: { log() {}, error() {} }, setTimeout: forbidden, setInterval: forbidden,
     require(name) {
+      if (name === '../../core/maintenance') return { maintenance: require('../src/core/maintenance').createMaintenance({ env: {} }) };
       if (name === 'express') return { Router: () => ({ get() {}, post: (p, f) => handlers.set(p, f) }) };
       if (name === '../../core/googleSheets') return { getSheetsClient: forbidden };
       if (name === './recoveredActiveSync') return {};
