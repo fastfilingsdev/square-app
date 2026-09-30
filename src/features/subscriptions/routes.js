@@ -43,6 +43,29 @@ const recoveredActiveSyncState = {
   lastCounts: null
 };
 
+// Shared by the HTTP caller and timer in this process. This is NOT durable
+// idempotency or a cross-instance/Google-writer lock. Keep those rollout gates.
+const newOrdersAdmission = { running: false, needsReconciliation: false };
+async function runAdmittedNewOrdersSync(options) {
+  if (newOrdersAdmission.running || newOrdersAdmission.needsReconciliation) {
+    const error = new Error(newOrdersAdmission.needsReconciliation
+      ? 'subscription sync requires reconciliation' : 'subscription sync already running');
+    error.syncAdmissionRejected = true;
+    throw error;
+  }
+  newOrdersAdmission.running = true;
+  try {
+    return await syncAuthNetNewOrders(options);
+  } catch (error) {
+    // A provider acceptance followed by a failed sheet write must not be
+    // silently retried on the next timer tick. No in-process reset endpoint.
+    if (options.mode === 'apply') newOrdersAdmission.needsReconciliation = true;
+    throw error;
+  } finally {
+    newOrdersAdmission.running = false;
+  }
+}
+
 function hasValidSyncToken(req) {
   const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
   if (!expected) return false;
@@ -67,6 +90,7 @@ function createSubscriptionsRouter() {
       onboardingSpreadsheetConfigured: Boolean(process.env.FF_ONBOARDING_SPREADSHEET_ID || process.env.ONBOARDING_SPREADSHEET_ID),
       arbLiveGateEnabled: isArbAutoCreateEnabled(),
       newOrdersAutoDiscoveryEnabled: isNewOrdersAutoDiscoveryEnabled(),
+      admission: { ...newOrdersAdmission, scope: 'process-local' },
       duplicateMembershipGuard: 'same-email-existing-active-or-created-membership-review',
       automation: {
         enabled: isNewOrdersAutomationEnabled(),
@@ -98,10 +122,15 @@ function createSubscriptionsRouter() {
       const maxDetails = Number(req.body?.maxDetails || req.query?.maxDetails || req.body?.maxRecords || req.query?.maxRecords || 2500) || 2500;
       const arbMode = String(req.body?.arbMode || req.query?.arbMode || 'dry-run').toLowerCase() === 'live' ? 'live' : 'dry-run';
       const allowLiveArb = req.body?.allowLiveArb === true;
-      const result = await syncAuthNetNewOrders({ mode, triggeredBy, lookbackDays, maxDetails, arbMode, allowLiveArb });
+      const result = await runAdmittedNewOrdersSync({ mode, triggeredBy, lookbackDays, maxDetails, arbMode, allowLiveArb });
       res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
       return res.status(200).json(result);
     } catch (err) {
+      if (err.syncAdmissionRejected) {
+        res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+        return res.status(409).json({ ok: false, error: err.message,
+          operationStarted: false, retryAutomatically: false });
+      }
       console.error('AUTHNET NEW ORDERS SYNC ERROR:', err.message);
       return res.status(500).json({ ok: false, error: err.message });
     }
@@ -173,7 +202,7 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
   automationState.running = true;
   automationState.lastRunAtUtc = new Date().toISOString();
   try {
-    const result = await syncAuthNetNewOrders({
+    const result = await runAdmittedNewOrdersSync({
       mode: 'apply',
       triggeredBy,
       lookbackDays: newOrdersAutomationLookbackDays(),
@@ -188,6 +217,10 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
     console.log('FF Billing New Orders automation completed', JSON.stringify({ counts: automationState.lastCounts, guards: automationState.lastGuards }));
     return result;
   } catch (err) {
+    if (err.syncAdmissionRejected) {
+      return { ok: false, skipped: true, reason: err.message,
+        operationStarted: false, retryAutomatically: false };
+    }
     uncertain = true;
     automationState.lastErrorAtUtc = new Date().toISOString();
     automationState.lastError = String(err?.message || err).slice(0, 300);
