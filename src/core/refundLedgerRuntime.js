@@ -1,6 +1,7 @@
 const { createRefundLedger } = require('./refundLedger');
 const { createPartialRefundLedger } = require('./partialRefundLedger');
-const { createSubscriptionLedger } = require('./subscriptionLedger');
+const { createMembershipLedger } = require('./membershipLedger');
+const { createCancellationLedger } = require('./cancellationLedger');
 
 function ledgerPoolConfig(env) {
   // Deliberately no generic DATABASE_URL fallback: never attach to another app's DB.
@@ -79,7 +80,8 @@ function createRefundLedgerRuntime({env=process.env, PoolClass, onPoolError=()=>
   }
   const refundLedger=(mode === 'partial' ? createPartialRefundLedger : createRefundLedger)({query});
   return Object.freeze({
-    subscriptionOptions:Object.freeze({subscriptionLedger:createSubscriptionLedger({query}),
+    subscriptionOptions:Object.freeze({subscriptionLedger:createMembershipLedger({query}),
+      cancellationLedger:createCancellationLedger({query}),
       providerScope:env.FF_REFUND_PROVIDER_SCOPE}),
     routerOptions:Object.freeze({refundLedger,providerScope:env.FF_REFUND_PROVIDER_SCOPE,
       ...(mode === 'partial' ? {refundCurrency:env.FF_REFUND_CURRENCY} : {})}),

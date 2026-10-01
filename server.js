@@ -16,6 +16,8 @@ const { createAuthNetWebhookRouter, startAuthNetBFallbackAutomation, startWebhoo
 const { createBillingRefundsRouter } = require('./src/features/billingRefunds/routes');
 const { createRefundServiceRuntime } = require('./src/core/refundServiceRuntime');
 const { createBillingPaymentLinksRouter } = require('./src/features/billingPaymentLinks/routes');
+const { createGooglePaymentReadsRouter } = require('./src/features/googlePaymentReads/routes');
+const { createGooglePaymentMutationsRouter } = require('./src/features/googlePaymentReads/mutations');
 const { createCloverHostedCheckoutRouter } = require('./src/features/cloverHostedCheckout/routes');
 const {
   buildCloverAuthorizeUrl,
@@ -1462,6 +1464,13 @@ app.use('/clover', createCloverHostedCheckoutRouter());
 const refundLedgerRuntime = createRefundServiceRuntime({ env: process.env,
   onPoolError: message => console.error(message) });
 app.use('/subscriptions', createSubscriptionsRouter(refundLedgerRuntime.subscriptionOptions));
+// Fail-closed feature gate inside; all requests still pass maintenance above.
+app.use('/google-payments', createGooglePaymentReadsRouter());
+app.use('/google-payments', createGooglePaymentMutationsRouter({
+  ledger: refundLedgerRuntime.subscriptionOptions?.subscriptionLedger,
+  cancellationLedger: refundLedgerRuntime.subscriptionOptions?.cancellationLedger,
+  providerScope: refundLedgerRuntime.subscriptionOptions?.providerScope
+}));
 app.use('/billing', createBillingRefundsRouter(refundLedgerRuntime.routerOptions));
 app.use('/billing', createBillingPaymentLinksRouter());
 

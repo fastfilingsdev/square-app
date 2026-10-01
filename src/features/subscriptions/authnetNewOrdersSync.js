@@ -1288,6 +1288,7 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscri
       if (!checked.ok) throw new Error('Subscription transaction validation failed');
       const arb = await subscriptionLedger.execute({
         providerScope, transactionId: transactionId(item.tx),
+        customerEmail: transactionEmail(item.tx), previousSubscriptionId: '',
         fingerprint: subscriptionFingerprint({ invoice: transactionInvoice(item.tx),
           amount: parseAmount(transactionAmount(item.tx)), startDate: item.firstBillingDate,
           email: transactionEmail(item.tx) }),

@@ -1,5 +1,37 @@
 # Subscription creation restart protection — staged rollout
 
+## Current candidate: shared membership and cancellation claims
+
+The v1 evidence and instructions below describe migration004, already tested.
+The current candidate runtime uses migrations005/006 instead: both new-order
+and Google recovery creation share a normalized-email membership head, across
+different original payments. Distinct email aliases are not a verified common
+identity and must not be described as customer-wide coverage across aliases.
+Recovery can advance a completed head only with the exact prior subscription;
+the handler independently verifies its terminated status and matching customer.
+Cancellation has a separate durable claim keyed by provider/subscription.
+
+The new native suite must pass before installation. Its first attempt was
+blocked by local initdb shared-memory permissions before any SQL; previous
+migration004 tests do NOT establish migration005/006 correctness. Keep all
+activation flags off and maintenance on. Before installation inventory v1 claims,
+Google recovery properties and provider receipts, including held operations.
+Never reinterpret an old hold as permission to dispatch another payment ID.
+
+Install005 then006 only as the migration owner with explicitly approved
+function-only runtime grants. Migration005 revokes the old serving creation
+functions. All callers must move together; old code cannot be a live fallback.
+Do not grant tables/schema/role administration to the serving login. Read back
+actual ACLs and runtime wiring, verify installed Google adapters, then consider
+the single approved scheduler. Do not run historical financial jobs as tests.
+
+Rollback: retain every old/new claim, receipt and approval; keep maintenance
+and all creation/cancellation gates off. Restoring old source does not authorize
+restoring old live writers or widening grants. Resolve uncertain provider
+operations separately before any reopening.
+
+## Historical v1 rollout and evidence
+
 This increment adds a dedicated subscription-claim table and two function-only
 operations to the existing ledger database. It does not change refund records,
 start a scheduler, execute payments, install a migration on startup or reopen traffic.
