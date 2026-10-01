@@ -1,7 +1,9 @@
 const axios = require('axios');
 const express = require('express');
 const { buildRefundDryRun, lookupRefundCandidates, FF_BILLING_SPREADSHEET_ID, FF_SUBSCRIPTIONS_SPREADSHEET_ID } = require('./refundLookup');
-const { liveRefundsEnabled, processRefundLive } = require('./refundProcess');
+const { liveRefundsEnabled } = require('./refundProcess');
+const { createGuardedRefundProcessor } = require('./refundGuard');
+const { hasValidAdminToken } = require('../../core/adminAccess');
 
 function bearerToken(req) {
   const auth = String(req.get('authorization') || '').trim();
@@ -9,11 +11,7 @@ function bearerToken(req) {
 }
 
 function hasValidSyncToken(req) {
-  const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
-  if (!expected) return false;
-  const headerToken = String(req.get('x-ff-sync-token') || req.get('x-authnet-sync-token') || '').trim();
-  const bearer = bearerToken(req);
-  return headerToken === expected || bearer === expected;
+  return hasValidAdminToken(req);
 }
 
 function allowedRefundGoogleEmails() {
@@ -26,7 +24,8 @@ async function verifyGoogleAccessToken(token) {
   try {
     const response = await axios.get('https://oauth2.googleapis.com/tokeninfo', {
       params: { access_token: token },
-      timeout: 10000
+      timeout: 10000,
+      maxRedirects: 0
     });
     const email = String(response.data?.email || '').trim().toLowerCase();
     const verified = response.data?.email_verified === true || String(response.data?.email_verified || '').toLowerCase() === 'true';
@@ -38,7 +37,7 @@ async function verifyGoogleAccessToken(token) {
       allowed: allowed.has(email)
     };
   } catch (err) {
-    return { ok: false, email: '', error: String(err.message || err).slice(0, 220) };
+    return { ok: false, email: '', error: 'Google authorization could not be verified' };
   }
 }
 
@@ -57,8 +56,18 @@ async function requireBillingAccess(req, res) {
   return true;
 }
 
-function createBillingRefundsRouter() {
+function createBillingRefundsRouter({ refundLedger, providerScope, refundCurrency, verifyRefundHistoryFn, refundTransactionFn } = {}) {
   const router = express.Router();
+  const processRefund = createGuardedRefundProcessor({ ledger: refundLedger, providerScope, refundCurrency, verifyRefundHistoryFn, refundTransactionFn });
+  const providerHistoryConfigured = refundLedger?.requiresRequestId !== true || typeof verifyRefundHistoryFn === 'function';
+
+  // Authentication only: no provider, ledger, spreadsheet or financial handler.
+  // Exact GET path is admitted during maintenance; normal operations stay held.
+  router.get('/refunds/auth-check', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (!await requireBillingAccess(req, res)) return;
+    return res.json({ ok: true, authenticated: true, operationStarted: false });
+  });
 
   router.get('/refunds/health', (req, res) => {
     res.json({
@@ -70,7 +79,9 @@ function createBillingRefundsRouter() {
       authnetConfigured: Boolean(process.env.AUTHNET_API_LOGIN_ID && process.env.AUTHNET_TRANSACTION_KEY),
       billingSpreadsheetConfigured: Boolean(FF_BILLING_SPREADSHEET_ID()),
       subscriptionsSpreadsheetConfigured: Boolean(FF_SUBSCRIPTIONS_SPREADSHEET_ID()),
-      liveRefundsEnabled: liveRefundsEnabled(),
+      liveRefundsEnabled: liveRefundsEnabled() && Boolean(refundLedger && providerScope) && providerHistoryConfigured,
+      providerHistoryConfigured,
+      persistentLedgerConfigured: Boolean(refundLedger && providerScope),
       liveRefundEmergencyDisableEnv: 'FF_BILLING_REFUNDS_DISABLED',
       refundFailureReporting: 'structured-authnet-transaction-response-errors',
       refundCardNumberFormat: 'last4-with-expiration-XXXX',
@@ -109,7 +120,7 @@ function createBillingRefundsRouter() {
   router.post('/refunds/process', async (req, res) => {
     if (!await requireBillingAccess(req, res)) return;
     try {
-      const result = await processRefundLive(req.body || {});
+      const result = await processRefund(req.body || {});
       res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
       return res.status(result.ok ? 200 : 409).json(result);
     } catch (err) {

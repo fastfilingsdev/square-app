@@ -1,4 +1,5 @@
 const express = require('express');
+const { maintenance } = require('../../core/maintenance');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
   syncAuthNetNewOrders,
@@ -42,6 +43,30 @@ const recoveredActiveSyncState = {
   lastCounts: null
 };
 
+// Shared by the HTTP caller and timer in this process. This is NOT durable
+// idempotency or a cross-instance/Google-writer lock. Keep those rollout gates.
+const newOrdersAdmission = { running: false, needsReconciliation: false };
+let subscriptionOptions = Object.freeze({});
+async function runAdmittedNewOrdersSync(options) {
+  if (newOrdersAdmission.running || newOrdersAdmission.needsReconciliation) {
+    const error = new Error(newOrdersAdmission.needsReconciliation
+      ? 'subscription sync requires reconciliation' : 'subscription sync already running');
+    error.syncAdmissionRejected = true;
+    throw error;
+  }
+  newOrdersAdmission.running = true;
+  try {
+    return await syncAuthNetNewOrders({ ...options, ...subscriptionOptions });
+  } catch (error) {
+    // A provider acceptance followed by a failed sheet write must not be
+    // silently retried on the next timer tick. No in-process reset endpoint.
+    if (options.mode === 'apply') newOrdersAdmission.needsReconciliation = true;
+    throw error;
+  } finally {
+    newOrdersAdmission.running = false;
+  }
+}
+
 function hasValidSyncToken(req) {
   const expected = process.env.FF_SYNC_ADMIN_TOKEN || process.env.AUTHNET_SYNC_TOKEN || '';
   if (!expected) return false;
@@ -51,7 +76,9 @@ function hasValidSyncToken(req) {
   return headerToken === expected || bearer === expected;
 }
 
-function createSubscriptionsRouter() {
+function createSubscriptionsRouter(options = {}) {
+  subscriptionOptions = Object.freeze({ subscriptionLedger: options.subscriptionLedger,
+    providerScope: options.providerScope });
   const router = express.Router();
 
   router.get('/authnet/new-orders/sync/health', (req, res) => {
@@ -66,6 +93,8 @@ function createSubscriptionsRouter() {
       onboardingSpreadsheetConfigured: Boolean(process.env.FF_ONBOARDING_SPREADSHEET_ID || process.env.ONBOARDING_SPREADSHEET_ID),
       arbLiveGateEnabled: isArbAutoCreateEnabled(),
       newOrdersAutoDiscoveryEnabled: isNewOrdersAutoDiscoveryEnabled(),
+      admission: { ...newOrdersAdmission, scope: 'process-local' },
+      durableCreationGuardConfigured: Boolean(subscriptionOptions.subscriptionLedger),
       duplicateMembershipGuard: 'same-email-existing-active-or-created-membership-review',
       automation: {
         enabled: isNewOrdersAutomationEnabled(),
@@ -97,10 +126,15 @@ function createSubscriptionsRouter() {
       const maxDetails = Number(req.body?.maxDetails || req.query?.maxDetails || req.body?.maxRecords || req.query?.maxRecords || 2500) || 2500;
       const arbMode = String(req.body?.arbMode || req.query?.arbMode || 'dry-run').toLowerCase() === 'live' ? 'live' : 'dry-run';
       const allowLiveArb = req.body?.allowLiveArb === true;
-      const result = await syncAuthNetNewOrders({ mode, triggeredBy, lookbackDays, maxDetails, arbMode, allowLiveArb });
+      const result = await runAdmittedNewOrdersSync({ mode, triggeredBy, lookbackDays, maxDetails, arbMode, allowLiveArb });
       res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
       return res.status(200).json(result);
     } catch (err) {
+      if (err.syncAdmissionRejected) {
+        res.set({ 'Cache-Control': 'no-store, max-age=0', Pragma: 'no-cache' });
+        return res.status(409).json({ ok: false, error: err.message,
+          operationStarted: false, retryAutomatically: false });
+      }
       console.error('AUTHNET NEW ORDERS SYNC ERROR:', err.message);
       return res.status(500).json({ ok: false, error: err.message });
     }
@@ -166,10 +200,13 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
   if (automationState.running) {
     return { ok: true, skipped: true, reason: 'automation already running' };
   }
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   automationState.running = true;
   automationState.lastRunAtUtc = new Date().toISOString();
   try {
-    const result = await syncAuthNetNewOrders({
+    const result = await runAdmittedNewOrdersSync({
       mode: 'apply',
       triggeredBy,
       lookbackDays: newOrdersAutomationLookbackDays(),
@@ -184,16 +221,23 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
     console.log('FF Billing New Orders automation completed', JSON.stringify({ counts: automationState.lastCounts, guards: automationState.lastGuards }));
     return result;
   } catch (err) {
+    if (err.syncAdmissionRejected) {
+      return { ok: false, skipped: true, reason: err.message,
+        operationStarted: false, retryAutomatically: false };
+    }
+    uncertain = true;
     automationState.lastErrorAtUtc = new Date().toISOString();
     automationState.lastError = String(err?.message || err).slice(0, 300);
     console.error('FF Billing New Orders automation error:', automationState.lastError);
     return { ok: false, error: automationState.lastError };
   } finally {
     automationState.running = false;
+    release(uncertain);
   }
 }
 
 function startNewOrdersAutomation({ initialDelayMs = 30000 } = {}) {
+  if (maintenance.status().paused) return automationState;
   if (automationState.started) return automationState;
   if (!isNewOrdersAutomationEnabled()) {
     console.log('FF Billing New Orders automation disabled by FF_BILLING_NEW_ORDERS_AUTOMATION_ENABLED=false');
@@ -217,6 +261,9 @@ async function runRecoveredActiveSyncAutomationOnce(triggeredBy = 'recovered-act
   if (recoveredActiveSyncState.running) {
     return { ok: true, skipped: true, reason: 'recovered active sync automation already running' };
   }
+  const release = maintenance.enter();
+  if (!release) return { ok: true, skipped: true, reason: 'maintenance' };
+  let uncertain = false;
   recoveredActiveSyncState.running = true;
   recoveredActiveSyncState.lastRunAtUtc = new Date().toISOString();
   try {
@@ -233,16 +280,19 @@ async function runRecoveredActiveSyncAutomationOnce(triggeredBy = 'recovered-act
     console.log('Recovered Subs → Active sync automation completed', JSON.stringify({ counts: recoveredActiveSyncState.lastCounts }));
     return result;
   } catch (err) {
+    uncertain = true;
     recoveredActiveSyncState.lastErrorAtUtc = new Date().toISOString();
     recoveredActiveSyncState.lastError = String(err?.message || err).slice(0, 300);
     console.error('Recovered Subs → Active sync automation error:', recoveredActiveSyncState.lastError);
     return { ok: false, error: recoveredActiveSyncState.lastError };
   } finally {
     recoveredActiveSyncState.running = false;
+    release(uncertain);
   }
 }
 
 function startRecoveredActiveSyncAutomation({ initialDelayMs = 60000 } = {}) {
+  if (maintenance.status().paused) return recoveredActiveSyncState;
   if (recoveredActiveSyncState.started) return recoveredActiveSyncState;
   if (!isRecoveredActiveSyncEnabled()) {
     console.log('Recovered Subs → Active sync automation disabled by RECOVERED_ACTIVE_SYNC_ENABLED=false');

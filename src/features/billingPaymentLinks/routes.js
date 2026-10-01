@@ -186,7 +186,10 @@ function createBillingPaymentLinksRouter() {
   });
 
   router.post('/payment-links/prepare', async (req, res) => {
-    if (!await hasValidBillingAccess(req, res)) return;
+    if (!await hasValidBillingAccess(req)) {
+      noStore(res);
+      return res.status(401).json({ ok: false, error: 'Unauthorized payment-link request' });
+    }
     const live = req.body?.live !== false;
     const linkId = req.body?.linkId || generatePaymentLinkId({ live });
     res.json({

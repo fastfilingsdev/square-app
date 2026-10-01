@@ -363,7 +363,7 @@ function isSettledForRefund(tx) {
   const status = transactionStatus(tx).toLowerCase();
   const type = transactionType(tx).toLowerCase();
   if (/refund|void/.test(type) || /voided|refund/.test(status)) return false;
-  return /settledsuccessfully|settled successfully|settled/.test(status) && !/pending/.test(status);
+  return status.replace(/\s+/g, '') === 'settledsuccessfully';
 }
 
 function possibleRefundAmountFromObject(obj) {
@@ -590,7 +590,8 @@ function refundCreditLikelyMatchesOriginal(listTx, originalTx) {
   const typeStatus = `${transactionType(listTx)} ${transactionStatus(listTx)}`.toLowerCase();
   if (!/refund|credit/.test(typeStatus)) return false;
   const originalId = transactionId(originalTx);
-  if (transactionRefTransId(listTx) && transactionRefTransId(listTx) === originalId) return true;
+  // Explicit provider linkage outranks invoice/email hints, including conflicts.
+  if (transactionRefTransId(listTx)) return transactionRefTransId(listTx) === originalId;
   const originalInvoice = transactionInvoice(originalTx);
   if (originalInvoice && transactionInvoice(listTx) === originalInvoice) return true;
   const originalEmail = transactionEmail(originalTx);
@@ -602,10 +603,9 @@ function refundCreditMatchesOriginal(detailTx, originalTx) {
   const typeStatus = `${transactionType(detailTx)} ${transactionStatus(detailTx)}`.toLowerCase();
   if (!/refund|credit/.test(typeStatus)) return false;
   const originalId = transactionId(originalTx);
-  if (transactionRefTransId(detailTx) === originalId) return true;
-  const originalInvoice = transactionInvoice(originalTx);
-  if (originalInvoice && transactionInvoice(detailTx) === originalInvoice) return true;
-  return false;
+  // Invoice numbers may be reused. They can select details for inspection but
+  // cannot prove which original payment consumed refund capacity.
+  return /^[1-9][0-9]{0,29}$/.test(originalId) && transactionRefTransId(detailTx) === originalId;
 }
 
 async function findRefundCreditsForOriginalTransaction(originalTx, {
@@ -766,19 +766,27 @@ async function lookupRefundCandidates({
 }
 
 function validateRefundSelection({ candidate, refundType, refundAmount }) {
+  const { minorUnits, decimalAmount } = require('../../core/refundBudget');
   const type = normalizeString(refundType || 'FULL').toUpperCase();
-  const requested = type === 'FULL' ? amountNumber(candidate?.refundableAmount) : amountNumber(refundAmount);
   const issues = [];
+  let remaining = 0n;
+  let requested = 0n;
+  try {
+    remaining = minorUnits(candidate?.refundableAmount);
+    requested = type === 'FULL' ? remaining : minorUnits(refundAmount);
+  } catch {
+    issues.push('refund amounts must be plain nonnegative decimals with at most two decimal places');
+  }
   if (!candidate) issues.push('missing selected transaction candidate');
   if (candidate && !candidate.refundable) issues.push(candidate.blockReason || 'selected transaction is not refundable');
   if (!['FULL', 'PARTIAL'].includes(type)) issues.push('refund type must be FULL or PARTIAL');
-  if (!requested || requested <= 0) issues.push('refund amount must be greater than zero');
-  if (candidate && requested > amountNumber(candidate.refundableAmount)) issues.push('refund amount exceeds refundable balance');
+  if (requested <= 0n) issues.push('refund amount must be greater than zero');
+  if (candidate && requested > remaining) issues.push('refund amount exceeds refundable balance');
   return {
     ok: issues.length === 0,
     issues,
     refundType: type,
-    refundAmount: money(requested)
+    refundAmount: decimalAmount(requested)
   };
 }
 
@@ -821,6 +829,8 @@ module.exports = {
     collectSheetReferences,
     isSettledForRefund,
     parseAmount,
+    refundCreditLikelyMatchesOriginal,
+    refundCreditMatchesOriginal,
     sanitizeDetailForCandidate,
     sheetRefundTotal,
     tableFromValues

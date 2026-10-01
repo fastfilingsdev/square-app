@@ -259,6 +259,16 @@ async function getTransactionListForBatch(batchId, { limit = 1000, offset = 1 } 
   }, config);
 }
 
+async function getUnsettledTransactionList({ limit = 1000, offset = 1 } = {}, config = getAuthNetConfig()) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1000 ||
+      !Number.isInteger(offset) || offset < 1 || offset > 100000) throw new Error('Invalid refund history pagination');
+  return authNetPost({getUnsettledTransactionListRequest: {
+    merchantAuthentication: getMerchantAuthentication(config),
+    sorting: {orderBy:'id',orderDescending:false},
+    paging: {limit,offset}
+  }},config);
+}
+
 function buildRefundTransactionRequest({
   refTransId,
   amount,
@@ -272,10 +282,13 @@ function buildRefundTransactionRequest({
   emailCustomer = false,
   refId = ''
 }, merchantAuthentication) {
-  const normalizedAmount = Number(amount);
+  const { minorUnits, decimalAmount } = require('../../core/refundBudget');
+  const normalizedAmount = minorUnits(amount);
   const last4 = String(cardLast4 || '').replace(/\D/g, '').slice(-4);
-  if (!refTransId) throw new Error('Missing original Authorize.Net transaction ID for refund');
-  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) throw new Error('Invalid Authorize.Net refund amount');
+  if (typeof refTransId !== 'string' || !/^[1-9][0-9]{0,29}$/.test(refTransId)) {
+    throw new Error('Valid linked original Authorize.Net transaction ID is required for refund');
+  }
+  if (normalizedAmount <= 0n) throw new Error('Invalid Authorize.Net refund amount');
   const profileRefund = Boolean(customerProfileId && customerPaymentProfileId);
   if (!profileRefund && last4.length !== 4) throw new Error('Missing card last4 required for Authorize.Net refund');
   // Linked Authorize.Net refunds require the original transaction plus the
@@ -318,7 +331,7 @@ function buildRefundTransactionRequest({
       ...(refId ? { refId: String(refId).slice(0, 20) } : {}),
       transactionRequest: {
         transactionType: 'refundTransaction',
-        amount: normalizedAmount.toFixed(2),
+        amount: decimalAmount(normalizedAmount),
         ...paymentOrProfile,
         refTransId: String(refTransId),
         ...(invoiceNumber || description ? {
@@ -495,5 +508,6 @@ module.exports = {
   getSubscription,
   getTransactionDetails,
   getTransactionListForBatch,
+  getUnsettledTransactionList,
   getTransactionListForCustomer
 };
