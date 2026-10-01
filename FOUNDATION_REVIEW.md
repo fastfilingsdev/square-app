@@ -1,5 +1,23 @@
 # Foundation repairs — code review checkpoint
 
+## 1 October installed acceptance checkpoint
+
+Reviewed runtime b82fbf6 is pin-deployed, not merged into main.536 offline tests
+pass. Native PostgreSQL membership/cancellation concurrency, permissions and
+restart checks plus production005/006 installation and serving ACL checks passed.
+The paired Google payment adapters, Billing schema/caller and signed receiver are
+installed and authenticated. Current source credentials moved to Render; frozen
+historical exposure cleanup is not complete. The controlled owner refund settled;
+no additional financial test or replay was performed.
+
+Maintenance is off and the approved15-minute new-orders automation has completed
+a successful normal cycle. Daily overlap remains suspended, auto-deploy off.
+Some separately held recovery/catch-up jobs and post-repair state scheduled runs
+still require acceptance before final foundation sign-off. Do not equate this
+checkpoint with independent review, GitHub CI, full workflow activation or a
+general provider failure-case test. See docs/render-only-payment-keys.md for
+the updated installation and native downstream evidence.
+
 ## 30 September maintenance increment
 
 The candidate now has process-local admission control for a coordinated cutover.
