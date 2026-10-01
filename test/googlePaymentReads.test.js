@@ -77,6 +77,30 @@ test('keys are injected only at fixed provider endpoint with bounded transport a
   assert.equal(f.calls.length, 1);
 });
 
+test('all read requests use provider schema field order regardless of caller object order', async () => {
+  const sorting={orderDescending:true,orderBy:'id'},paging={offset:1,limit:1};
+  const cases=[
+    ['getTransactionListRequest',{paging,sorting,batchId:'123'},['batchId','sorting','paging']],
+    ['ARBGetSubscriptionListRequest',{paging,sorting,searchType:'subscriptionActive'},['searchType','sorting','paging']],
+    ['getUnsettledTransactionListRequest',{paging,sorting},['sorting','paging']],
+    ['ARBGetSubscriptionRequest',{includeTransactions:true,subscriptionId:'123'},['subscriptionId','includeTransactions']],
+    ['getSettledBatchListRequest',{lastSettlementDate:'2026-09-30T00:00:00Z',firstSettlementDate:'2026-09-29T00:00:00Z',includeStatistics:false},
+      ['includeStatistics','firstSettlementDate','lastSettlementDate']],
+    ['getCustomerProfileRequest',{unmaskExpirationDate:false,customerProfileId:'123'},['customerProfileId','unmaskExpirationDate']],
+    ['getTransactionDetailsRequest',{transId:'123'},['transId']]
+  ];
+  for(const [operation,parameters,order] of cases){
+    const before=JSON.stringify(parameters),f=fixture();
+    assert.equal((await f.handle({...request,body:{operation,parameters}})).status,200);
+    const encoded=f.calls[0][1][operation];
+    assert.deepEqual(Object.keys(encoded),['merchantAuthentication',...order],operation);
+    if(encoded.sorting)assert.deepEqual(Object.keys(encoded.sorting),['orderBy','orderDescending']);
+    if(encoded.paging)assert.deepEqual(Object.keys(encoded.paging),['limit','offset']);
+    assert.equal(JSON.stringify(parameters),before,'caller object must not be mutated');
+    assert.equal(f.calls.length,1,'ordering does not add retries');
+  }
+});
+
 test('response masks payment fields, strips credentials and redacts reflected secrets', async () => {
   const f = fixture({ post: async () => ({ status: 200, data: { messages: { resultCode: 'Ok' },
     transaction: { cardNumber: '4111111111111111', expirationDate: '2030-01', cardCode: '123',

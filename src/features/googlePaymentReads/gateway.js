@@ -41,6 +41,33 @@ function validateRequest(body) {
     ['operation', 'parameters']) && validators[body.operation](body.parameters);
 }
 
+// Authorize.Net's JSON endpoint is backed by an ordered XML schema. In
+// particular sorting must precede paging; caller insertion order is not safe.
+// Match the official SDK request constructors, without changing the allowlist.
+const parameterOrder = {
+  ARBGetSubscriptionListRequest: ['searchType', 'sorting', 'paging'],
+  ARBGetSubscriptionRequest: ['subscriptionId', 'includeTransactions'],
+  getUnsettledTransactionListRequest: ['sorting', 'paging'],
+  getSettledBatchListRequest: ['includeStatistics', 'firstSettlementDate', 'lastSettlementDate'],
+  getTransactionListRequest: ['batchId', 'sorting', 'paging'],
+  getTransactionDetailsRequest: ['transId'],
+  getCustomerProfileRequest: ['customerProfileId', 'unmaskExpirationDate']
+};
+function buildProviderReadRequest(body, env) {
+  if (!validateRequest(body)) throw Error('Unsupported payment read request');
+  const parameters = {};
+  for (const key of parameterOrder[body.operation]) {
+    if (!Object.hasOwn(body.parameters, key)) continue;
+    const value = body.parameters[key];
+    parameters[key] = key === 'sorting' ? {orderBy: value.orderBy, orderDescending: value.orderDescending} :
+      key === 'paging' ? {limit: value.limit, offset: value.offset} : value;
+  }
+  return {[body.operation]: {
+    merchantAuthentication: {name: env.AUTHNET_API_LOGIN_ID, transactionKey: env.AUTHNET_TRANSACTION_KEY},
+    ...parameters
+  }};
+}
+
 // Preserve the provider's read-response shape, but never pass credentials, full
 // account numbers, security codes or expiration dates back to Google.
 function sanitize(value, secrets = [], depth = 0) {
@@ -84,10 +111,7 @@ function createPaymentReadHandler({ env = process.env, verify = verifyGoogleAcce
       }
       if (!validateRequest(body)) return reply(400, 'Unsupported payment read request');
       if (!env.AUTHNET_API_LOGIN_ID || !env.AUTHNET_TRANSACTION_KEY) return reply(503, 'Payment read bridge not configured');
-      const request = { [body.operation]: {
-        merchantAuthentication: { name: env.AUTHNET_API_LOGIN_ID, transactionKey: env.AUTHNET_TRANSACTION_KEY },
-        ...body.parameters
-      } };
+      const request = buildProviderReadRequest(body, env);
       const response = await post(ENDPOINT, request, {
         timeout: 45000, maxRedirects: 0, maxContentLength: 4 * 1024 * 1024, maxBodyLength: 16384,
         headers: { 'Content-Type': 'application/json' }
@@ -104,4 +128,4 @@ function createPaymentReadHandler({ env = process.env, verify = verifyGoogleAcce
   };
 }
 
-module.exports = { createPaymentReadHandler, validateRequest, sanitize };
+module.exports = { createPaymentReadHandler, validateRequest, buildProviderReadRequest, sanitize };
