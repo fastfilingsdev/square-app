@@ -342,10 +342,12 @@ function transactionStatus(tx) {
 }
 
 function isApprovedTransaction(tx) {
-  if (normalizeString(tx?.responseCode) === '1') return true;
-  const status = transactionStatus(tx).toLowerCase();
-  if (!transactionId(tx)) return false;
-  return /approved|captured|settled|pendingsettlement|authcapture created/.test(status);
+  // An approval code alone also covers authorizations that were never captured.
+  // Only exact successful charge states may enter membership conversion.
+  if (!transactionId(tx) || normalizeString(tx?.responseCode) !== '1') return false;
+  if (!['capturedPendingSettlement', 'settledSuccessfully'].includes(transactionStatus(tx))) return false;
+  const type = normalizeString(tx?.transactionType);
+  return !type || ['authCaptureTransaction', 'priorAuthCaptureTransaction', 'captureOnlyTransaction'].includes(type);
 }
 
 function transactionProfileIds(tx) {
