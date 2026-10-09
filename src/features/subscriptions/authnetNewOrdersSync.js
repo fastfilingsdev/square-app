@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { verifyProfileReady } = require('./profileReadiness');
 const { subscriptionFingerprint } = require('../../core/subscriptionLedger');
 const { getSheetsClient } = require('../../core/googleSheets');
 const { authNetPost, getMerchantAuthentication, getSubscription } = require('../../connectors/authnet/client');
@@ -1306,6 +1307,8 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscri
         create: async () => {
           const profileIds = await ensureProfileForTransaction(item.tx);
           item.fields['Profile Creation Status'] = profileIds.source === 'transactionDetail' ? 'Existing profile on transaction detail' : 'Created from original transaction';
+          await verifyProfileReady({ profileIds, post: authNetPostWithAuth });
+          item.fields['Profile Creation Status'] += ' — payment profile readback verified';
           return createArbSubscriptionForOrder({ order: item.order, tx: item.tx,
             profileIds, firstBillingDate: item.firstBillingDate });
         }
