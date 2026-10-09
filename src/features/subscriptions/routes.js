@@ -3,6 +3,7 @@ const { maintenance } = require('../../core/maintenance');
 const { getSheetsClient } = require('../../core/googleSheets');
 const {
   syncAuthNetNewOrders,
+  appendBillingAuditNote,
   isArbAutoCreateEnabled,
   isNewOrdersAutomationEnabled,
   isNewOrdersAutoDiscoveryEnabled,
@@ -45,7 +46,13 @@ const recoveredActiveSyncState = {
 
 // Shared by the HTTP caller and timer in this process. This is NOT durable
 // idempotency or a cross-instance/Google-writer lock. Keep those rollout gates.
-const newOrdersAdmission = { running: false, needsReconciliation: false };
+const newOrdersAdmission = {
+  running: false,
+  needsReconciliation: false,
+  reconciliationReason: '',
+  reconciliationSinceUtc: null
+};
+const AUTOMATION_AUDIT_THROTTLE_MS = 60 * 60 * 1000;
 let subscriptionOptions = Object.freeze({});
 async function runAdmittedNewOrdersSync(options) {
   if (newOrdersAdmission.running || newOrdersAdmission.needsReconciliation) {
@@ -60,7 +67,14 @@ async function runAdmittedNewOrdersSync(options) {
   } catch (error) {
     // A provider acceptance followed by a failed sheet write must not be
     // silently retried on the next timer tick. No in-process reset endpoint.
-    if (options.mode === 'apply') newOrdersAdmission.needsReconciliation = true;
+    // Errors raised before any live subscription attempt (sheet/Auth.Net read
+    // failures, header checks, config) wrote nothing to the provider, so they
+    // must not freeze the scheduler until a restart.
+    if (options.mode === 'apply' && error?.providerWriteAttempted !== false) {
+      newOrdersAdmission.needsReconciliation = true;
+      newOrdersAdmission.reconciliationReason = String(error?.message || error).slice(0, 300);
+      newOrdersAdmission.reconciliationSinceUtc = new Date().toISOString();
+    }
     throw error;
   } finally {
     newOrdersAdmission.running = false;
@@ -107,6 +121,8 @@ function createSubscriptionsRouter(options = {}) {
         lastSuccessAtUtc: automationState.lastSuccessAtUtc,
         lastErrorAtUtc: automationState.lastErrorAtUtc,
         lastError: automationState.lastError,
+        lastSkipAtUtc: automationState.lastSkipAtUtc || null,
+        lastSkipReason: automationState.lastSkipReason || '',
         lastCounts: automationState.lastCounts,
         lastGuards: automationState.lastGuards
       },
@@ -216,19 +232,45 @@ async function runNewOrdersAutomationOnce(triggeredBy = 'ff-billing-new-orders-a
     });
     automationState.lastSuccessAtUtc = new Date().toISOString();
     automationState.lastError = '';
+    automationState.lastAuditedError = '';
+    automationState.lastErrorAuditMs = 0;
     automationState.lastCounts = result.counts || null;
     automationState.lastGuards = result.guards || null;
     console.log('FF Billing New Orders automation completed', JSON.stringify({ counts: automationState.lastCounts, guards: automationState.lastGuards }));
     return result;
   } catch (err) {
     if (err.syncAdmissionRejected) {
+      automationState.lastSkipAtUtc = new Date().toISOString();
+      automationState.lastSkipReason = err.message;
+      console.error('FF Billing New Orders automation SKIPPED:', err.message, JSON.stringify({ admission: newOrdersAdmission }));
+      if (newOrdersAdmission.needsReconciliation && Date.now() - (automationState.lastSkipAuditMs || 0) >= AUTOMATION_AUDIT_THROTTLE_MS) {
+        automationState.lastSkipAuditMs = Date.now();
+        await appendBillingAuditNote({ triggeredBy, action: 'Auth.Net new membership order sync BLOCKED',
+          result: `blocked: ${err.message}; since ${newOrdersAdmission.reconciliationSinceUtc || '?'}; cause: ${newOrdersAdmission.reconciliationReason || '?'}`,
+          safetyNotes: 'No sync ran. Reconcile the last live attempt, then restart the service to clear the process-local hold.' });
+      }
       return { ok: false, skipped: true, reason: err.message,
         operationStarted: false, retryAutomatically: false };
     }
     uncertain = true;
+    const message = String(err?.message || err).slice(0, 300);
+    const retriable = err?.providerWriteAttempted === false;
+    const auditSignature = `${retriable ? 'retry' : 'hold'}:${message}`;
     automationState.lastErrorAtUtc = new Date().toISOString();
-    automationState.lastError = String(err?.message || err).slice(0, 300);
+    automationState.lastError = message;
     console.error('FF Billing New Orders automation error:', automationState.lastError);
+    // Pre-attempt failures retry every tick. Audit the first one and any new
+    // message immediately, then at most hourly, so a long outage does not
+    // append a Billing Audit Log row every 15 minutes.
+    if (auditSignature !== automationState.lastAuditedError || Date.now() - (automationState.lastErrorAuditMs || 0) >= AUTOMATION_AUDIT_THROTTLE_MS) {
+      automationState.lastErrorAuditMs = Date.now();
+      automationState.lastAuditedError = auditSignature;
+      await appendBillingAuditNote({ triggeredBy, action: 'Auth.Net new membership order sync ERROR',
+        result: `error: ${automationState.lastError}`,
+        safetyNotes: retriable
+          ? 'Failed before any live subscription attempt; next tick retries automatically.'
+          : 'Failed after a live subscription attempt started; scheduler held for reconciliation.' });
+    }
     return { ok: false, error: automationState.lastError };
   } finally {
     automationState.running = false;
