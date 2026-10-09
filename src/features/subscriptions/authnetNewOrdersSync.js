@@ -104,6 +104,31 @@ function isNewOrdersAutoDiscoveryEnabled() {
   return envFlag('FF_BILLING_NEW_ORDERS_AUTO_DISCOVERY_ENABLED', false);
 }
 
+// Backlog hold: live ARB creation runs automatically only for original charges
+// newer than this many hours. Older rows wait for the owner to list the
+// original Auth.Net transaction ID in FF_BILLING_ARB_APPROVED_TRANSACTION_IDS.
+// Set FF_BILLING_ARB_AUTO_MAX_AGE_HOURS=0 to switch the hold off.
+function arbAutoMaxAgeHours() {
+  const raw = process.env.FF_BILLING_ARB_AUTO_MAX_AGE_HOURS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return 24;
+  const hours = Number(raw);
+  return Number.isFinite(hours) && hours >= 0 ? hours : 24;
+}
+
+function arbApprovedTransactionIds() {
+  return new Set(String(process.env.FF_BILLING_ARB_APPROVED_TRANSACTION_IDS || '')
+    .split(/[\s,;]+/).map(item => item.trim()).filter(item => /^\d{1,30}$/.test(item)));
+}
+
+function arbBacklogHoldReason(tx, nowMs = Date.now()) {
+  const maxAgeHours = arbAutoMaxAgeHours();
+  if (!maxAgeHours) return '';
+  if (arbApprovedTransactionIds().has(transactionId(tx))) return '';
+  const submittedMs = Date.parse(transactionSubmitTime(tx));
+  if (Number.isFinite(submittedMs) && nowMs - submittedMs <= maxAgeHours * 3600 * 1000) return '';
+  return `original charge older than ${maxAgeHours}h (or time unknown); add transaction ${transactionId(tx)} to FF_BILLING_ARB_APPROVED_TRANSACTION_IDS to approve`;
+}
+
 function newOrdersAutomationIntervalMs() {
   const minutes = Number(process.env.FF_BILLING_NEW_ORDERS_AUTOMATION_INTERVAL_MINUTES || 15);
   const safeMinutes = Number.isFinite(minutes) && minutes > 0 ? minutes : 15;
@@ -996,6 +1021,43 @@ async function createCustomerProfileFromTransaction(transId) {
   return { customerProfileId, customerPaymentProfileId, source: 'createCustomerProfileFromTransaction' };
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function authNetErrorCodes(err) {
+  const codes = (err?.authNetFailure?.messages || []).map(item => item.code).filter(Boolean);
+  const inMessage = String(err?.message || '').match(/\bE\d{5}\b/g) || [];
+  return new Set([...codes, ...inMessage]);
+}
+
+function arbProfileSettleMs() {
+  const ms = Number(process.env.FF_BILLING_ARB_PROFILE_SETTLE_MS || 10000);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, 60000) : 10000;
+}
+
+// A customer profile created a moment ago from the original transaction is
+// not always visible to ARBCreateSubscription yet; Authorize.Net then answers
+// E00040 "The record cannot be found." E00040 is a definite rejection (no
+// subscription exists), so only that code is retried, after a delay.
+async function createArbSubscriptionWithProfileRetry(args) {
+  const delays = args.profileIds.source === 'createCustomerProfileFromTransaction'
+    ? [arbProfileSettleMs(), 15000, 30000]
+    : [0, 15000];
+  let lastErr;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    if (delays[attempt]) await sleep(delays[attempt]);
+    try {
+      return await createArbSubscriptionForOrder(args);
+    } catch (err) {
+      lastErr = err;
+      if (!authNetErrorCodes(err).has('E00040') || attempt + 1 >= delays.length) throw err;
+      console.warn('ARB create got E00040 (profile not visible yet); retrying', JSON.stringify({ row: args.order?.rowNumber, attempt: attempt + 1 }));
+    }
+  }
+  throw lastErr;
+}
+
 async function ensureProfileForTransaction(tx) {
   const existing = transactionProfileIds(tx);
   if (existing.customerProfileId && existing.customerPaymentProfileId) {
@@ -1009,7 +1071,7 @@ function arbInvoiceNumber(invoiceNumber, rowNumber) {
   return `SUB-${base}`.slice(0, 20);
 }
 
-async function createArbSubscriptionForOrder({ order, tx, profileIds, firstBillingDate }) {
+async function createArbSubscriptionForOrder({ order, tx, profileIds, firstBillingDate, progress }) {
   const amount = transactionAmount(tx) || parseAmount(getCell(order.row, order.map, 'Amount'));
   if (!amountEqual(amount, getCell(order.row, order.map, 'Amount'))) {
     throw new Error('Refusing ARB creation: amount mismatch before subscription create');
@@ -1040,6 +1102,9 @@ async function createArbSubscriptionForOrder({ order, tx, profileIds, firstBilli
       }
     }
   };
+  // Latch only once this request is about to leave the process. A ledger claim,
+  // profile create, or local validation failure is not an ARB attempt.
+  if (progress) progress.providerWriteAttempted = true;
   const data = await authNetPostWithAuth(payload);
   const subscriptionId = normalizeString(data.subscriptionId);
   if (!subscriptionId) throw new Error('Authorize.Net did not return a subscription ID');
@@ -1252,7 +1317,7 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
   return { rowUpdates, conversionUpserts, activeInserts: [], onboardingInserts: [], review, skipped, ready, activeIds, onboarding };
 }
 
-async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope }) {
+async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope, progress = {} }) {
   const results = [];
   if (!arbLiveRequested) {
     plan.conversionUpserts.forEach(item => {
@@ -1282,6 +1347,20 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscri
       results.push({ rowNumber: item.order.rowNumber, status: 'skipped-existing-subscription', subscriptionId: item.newSubscriptionId });
       continue;
     }
+    const holdReason = arbBacklogHoldReason(item.tx);
+    if (holdReason) {
+      item.fields['ARB Creation Status'] = 'Held — owner approval required';
+      item.fields.Notes = appendNote(item.fields.Notes, `Backlog hold: ${holdReason}`);
+      const heldUpdate = plan.rowUpdates.find(update => update.rowNumber === item.order.rowNumber);
+      if (heldUpdate) {
+        heldUpdate.fields['Sub Created'] = '';
+        heldUpdate.fields['Payment Status'] = 'Review — held for owner approval';
+        heldUpdate.fields['Route Target'] = 'Review / Owner approval';
+        heldUpdate.fields['Review Status'] = `Backlog hold: ${holdReason}`;
+      }
+      results.push({ rowNumber: item.order.rowNumber, status: 'held-owner-approval', reason: holdReason });
+      continue;
+    }
     try {
       if (!subscriptionLedger) throw new Error('Durable subscription ledger is required');
       const checked = validateOrderAgainstTransaction(item.order, item.tx);
@@ -1295,8 +1374,8 @@ async function maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscri
         create: async () => {
           const profileIds = await ensureProfileForTransaction(item.tx);
           item.fields['Profile Creation Status'] = profileIds.source === 'transactionDetail' ? 'Existing profile on transaction detail' : 'Created from original transaction';
-          return createArbSubscriptionForOrder({ order: item.order, tx: item.tx,
-            profileIds, firstBillingDate: item.firstBillingDate });
+          return createArbSubscriptionWithProfileRetry({ order: item.order, tx: item.tx,
+            profileIds, firstBillingDate: item.firstBillingDate, progress });
         }
       });
       markSubscriptionCreatedOnPlan({
@@ -1449,6 +1528,26 @@ async function applyPlan({ sheets, billingSpreadsheetId, subscriptionsSpreadshee
   return { activeApplied, onboardingApplied, onboardingNote, conversionAppends: conversionAppends.length };
 }
 
+// Best-effort Billing Audit Log row so stalled/failed automation is visible in
+// the workbook, not only in Render logs. Never throws.
+async function appendBillingAuditNote({ triggeredBy, action, result, safetyNotes = '' }) {
+  try {
+    const sheets = await getSheetsClient();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: FF_BILLING_SPREADSHEET_ID(),
+      range: `${quoteSheetName(TABS.billingAuditLog)}!A:${colLetter(BILLING_AUDIT_HEADERS.length)}`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[nowIso(), triggeredBy, action, TABS.billingNewOrders, '', '', '', '',
+        String(result || '').slice(0, 300), String(safetyNotes || '').slice(0, 300)]] }
+    });
+    return true;
+  } catch (err) {
+    console.error('Billing Audit Log note failed:', safeErrorMessage(err));
+    return false;
+  }
+}
+
 function collectRequiredTransactionIds(newOrderRows) {
   const table = tableFromValues(newOrderRows);
   const ids = new Set();
@@ -1459,7 +1558,19 @@ function collectRequiredTransactionIds(newOrderRows) {
   return Array.from(ids);
 }
 
-async function syncAuthNetNewOrders({
+// Tags thrown errors with whether any live subscription attempt had started,
+// so the caller only demands reconciliation when a provider write may exist.
+async function syncAuthNetNewOrders(options = {}) {
+  const progress = { providerWriteAttempted: false };
+  try {
+    return await runSyncAuthNetNewOrders(options, progress);
+  } catch (err) {
+    if (err && typeof err === 'object') err.providerWriteAttempted = progress.providerWriteAttempted;
+    throw err;
+  }
+}
+
+async function runSyncAuthNetNewOrders({
   mode = 'dry-run',
   triggeredBy = 'api',
   lookbackDays = 14,
@@ -1468,7 +1579,7 @@ async function syncAuthNetNewOrders({
   allowLiveArb = false,
   subscriptionLedger,
   providerScope
-} = {}) {
+} = {}, progress = {}) {
   const dryRun = String(mode || '').toLowerCase() !== 'apply';
   const arbLiveRequested = String(arbMode || '').toLowerCase() === 'live';
   const arbLiveEnabled = !dryRun && arbLiveRequested && Boolean(allowLiveArb) && isArbAutoCreateEnabled();
@@ -1507,7 +1618,7 @@ async function syncAuthNetNewOrders({
 
   const plan = buildPlan({ newOrderRows: plannedNewOrderRows, conversionRows, activeRows, onboardingRows, auth });
   plan.newOrderDiscovery = discovery.discovered;
-  const arbResults = !dryRun ? await maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope }) : [];
+  const arbResults = !dryRun ? await maybeCreateArbs({ plan, arbLiveEnabled, arbLiveRequested, subscriptionLedger, providerScope, progress }) : [];
 
   let applyResult = { activeApplied: false, onboardingApplied: false, onboardingNote: '', conversionAppends: 0 };
   if (!dryRun) {
@@ -1560,6 +1671,7 @@ async function syncAuthNetNewOrders({
       skipped: plan.skipped.length,
       arbsCreated: arbResults.filter(item => item.status === 'created').length,
       arbsFailed: arbResults.filter(item => item.status === 'failed').length,
+      arbsHeldForApproval: arbResults.filter(item => item.status === 'held-owner-approval').length,
       activeInserts: plan.activeInserts.length,
       onboardingInserts: plan.onboardingInserts.length
     },
@@ -1581,6 +1693,7 @@ async function syncAuthNetNewOrders({
 
 module.exports = {
   syncAuthNetNewOrders,
+  appendBillingAuditNote,
   pullRecentTransactions,
   buildPlan,
   matchTransactionForOrder,
@@ -1594,6 +1707,8 @@ module.exports = {
   newOrdersAutomationMaxDetails,
   __authNetNewOrdersTestHooks: {
     maybeCreateArbs,
+    arbBacklogHoldReason,
+    authNetErrorCodes,
     addDaysDateOnly,
     amountEqual,
     buildConversionFields,

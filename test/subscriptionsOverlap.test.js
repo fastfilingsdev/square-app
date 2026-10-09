@@ -8,7 +8,7 @@ const vm = require('node:vm');
 // Actual router/timer entry points; only the business sync is synthetic.
 // No provider, Google, network, financial operations, or real timers.
 function fixture() {
-  const handlers = new Map(), calls = [], pending = [];
+  const handlers = new Map(), calls = [], pending = [], notes = [];
   const maintenance = require('../src/core/maintenance').createMaintenance({ env: {} });
   const module = { exports: {} };
   const deny = () => { throw Error('External operation prohibited'); };
@@ -16,11 +16,19 @@ function fixture() {
     module, process: { env: { FF_SYNC_ADMIN_TOKEN: 'synthetic' } },
     console: { log() {}, error() {} }, setTimeout: deny, setInterval: deny,
     require(name) {
-      if (name === 'express') return { Router: () => ({ get() {}, post(p, f) { handlers.set(p, f); } }) };
+      if (name === 'express') return { Router: () => ({
+        get(p, f) { handlers.set('GET ' + p, f); },
+        post(p, f) { handlers.set(p, f); }
+      }) };
       if (name === '../../core/maintenance') return { maintenance };
       if (name === '../../core/googleSheets') return { getSheetsClient: deny };
       if (name === './recoveredActiveSync') return {};
       if (name === './authnetNewOrdersSync') return {
+        appendBillingAuditNote: async note => { notes.push(note); return true; },
+        isArbAutoCreateEnabled: () => false,
+        isNewOrdersAutomationEnabled: () => true,
+        isNewOrdersAutoDiscoveryEnabled: () => false,
+        newOrdersAutomationIntervalMs: () => 900000,
         newOrdersAutomationLookbackDays: () => 14,
         newOrdersAutomationMaxDetails: () => 2500,
         syncAuthNetNewOrders(options) {
@@ -33,8 +41,13 @@ function fixture() {
   });
   module.exports.createSubscriptionsRouter();
   return {
-    calls, pending, maintenance,
+    calls, pending, maintenance, notes,
     tick: () => module.exports.runNewOrdersAutomationOnce(),
+    health() {
+      const res = { body: null, json(b) { this.body = b; return this; } };
+      handlers.get('GET /authnet/new-orders/sync/health')({}, res);
+      return res.body;
+    },
     async manual() {
       const res = { code: 200, headers: {}, status(n) { this.code = n; return this; },
         set(h) { Object.assign(this.headers, h); return this; }, json(b) { this.body = b; return this; } };
@@ -103,4 +116,54 @@ test('a failed scheduled pass blocks the next tick and manual replay', async () 
   assert.equal(f.calls.length, 1);
   assert.equal(f.maintenance.status().active, 0);
   assert.equal(f.maintenance.status().uncertain, 1);
+});
+
+test('a failure before any provider write does not freeze later ticks', async () => {
+  const f = fixture(), first = f.tick();
+  const err = Error('synthetic Sheets 503 during read'); err.providerWriteAttempted = false;
+  f.pending[0].reject(err);
+  assert.equal((await first).ok, false);
+  assert.equal(f.notes.length, 1); assert.match(f.notes[0].action, /ERROR/);
+  const next = f.tick();
+  assert.equal(f.calls.length, 2, 'next tick must run the sync again');
+  f.pending[1].resolve({ ok: true }); await next;
+});
+
+test('a blocked tick is logged to the Billing Audit Log, at most hourly', async () => {
+  const f = fixture(), first = f.tick();
+  f.pending[0].reject(Error('synthetic lost sheet acknowledgement'));
+  await first;
+  await f.tick(); await f.tick();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.notes.filter(n => /BLOCKED/.test(n.action)).length, 1);
+  const health = f.health();
+  assert.equal(health.admission.needsReconciliation, true);
+  assert.match(health.admission.reconciliationReason, /lost sheet acknowledgement/);
+  assert.match(health.automation.lastSkipReason, /reconciliation/);
+  assert.ok(health.automation.lastSkipAtUtc);
+});
+
+test('repeated pre-attempt failures retry and audit once until the message changes', async () => {
+  const f = fixture();
+  const fail = message => {
+    const err = Error(message);
+    err.providerWriteAttempted = false;
+    return err;
+  };
+  const first = f.tick();
+  f.pending[0].reject(fail('synthetic Sheets 503 during read'));
+  await first;
+  const second = f.tick();
+  f.pending[1].reject(fail('synthetic Sheets 503 during read'));
+  await second;
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.notes.filter(n => /ERROR/.test(n.action)).length, 1);
+  const third = f.tick();
+  f.pending[2].reject(fail('synthetic Auth.Net timeout during read'));
+  await third;
+  assert.equal(f.notes.filter(n => /ERROR/.test(n.action)).length, 2);
+  const health = f.health();
+  assert.equal(health.admission.needsReconciliation, false);
+  assert.match(health.automation.lastError, /Auth\.Net timeout/);
+  assert.equal(health.automation.lastSkipReason, '');
 });
