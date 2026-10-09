@@ -264,6 +264,15 @@ function addDaysDateOnly(value, days) {
   return date.toISOString().slice(0, 10);
 }
 
+function nextMonthlyDate(value) {
+  const ms = parseDateMs(value);
+  if (!ms) return '';
+  const date = new Date(ms);
+  const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 2, 0)).getUTCDate();
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1,
+    Math.min(date.getUTCDate(), lastDay))).toISOString().slice(0, 10);
+}
+
 function appendNote(existing, note) {
   const prior = normalizeString(existing);
   const text = normalizeString(note);
@@ -909,7 +918,7 @@ function buildConversionFields({ order, tx, status, notes = '', newSubscriptionI
   const m = order.map;
   const row = order.row;
   const amount = transactionAmount(tx) || parseAmount(getCell(row, m, 'Amount'));
-  const firstBillingDate = addDaysDateOnly(transactionSubmitTime(tx) || getCell(row, m, 'Time'), 30);
+  const firstBillingDate = nextMonthlyDate(transactionSubmitTime(tx) || getCell(row, m, 'Time'));
   const invoice = transactionInvoice(tx) || getCell(row, m, 'Order / Invoice #');
   const txId = transactionId(tx) || getCell(row, m, 'Auth.Net Transaction ID');
   const approvalEvidence = txId && invoice
@@ -1213,7 +1222,7 @@ function buildPlan({ newOrderRows, conversionRows, activeRows, onboardingRows, a
       order,
       tx: match.tx,
       status: {},
-      notes: `Matched from ${match.source}; guarded conversion is ready. ARB must start 30 days after original charge.`,
+      notes: `Matched from ${match.source}; guarded conversion is ready. ARB starts one calendar month after the original charge, clamped to month-end when necessary.`,
       now
     });
     const firstBillingDate = conversionFields['First Billing Date'];
@@ -1597,6 +1606,7 @@ module.exports = {
   __authNetNewOrdersTestHooks: {
     maybeCreateArbs,
     addDaysDateOnly,
+    nextMonthlyDate,
     amountEqual,
     buildConversionFields,
     discoverNewOrderRows,
