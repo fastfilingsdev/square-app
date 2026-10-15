@@ -1,4 +1,41 @@
-# Render-only payment keys — migration candidate
+# Render-only payment keys — installed migration and acceptance
+
+## 1 October verified checkpoint
+
+Runtime b82fbf6 is pinned on Render (deployment dep-dav2ggo473hc73d8ovgg).
+All nine intended production Google source replacements were installed with
+exact persisted readbacks; eleven other source files were preserved. Active
+source has no legacy payment credentials or direct provider transport. Existing
+recovery journals/receipts remain intact. Historical frozen source versions may
+still contain old credentials: retirement and owner-coordinated rotation remain
+an explicit exposure-cleanup follow-up, not a completed action.
+
+Approved database migrations005/006 and the four function-only serving grants
+passed production installation/ACL checks. The native PostgreSQL membership and
+cancellation suite passed, including concurrency and restart durability. The
+offline repository suite passes536 tests. Actual seven-operation provider reads,
+Google OAuth batch reporting and invalid-token rejection passed. Installed
+Billing/schema/ledger readiness, no-dispatch request rejection and signed Google
+connection acceptance passed. General refund caller and signed sync are enabled;
+the previously owner-approved refund independently reached final settlement.
+No additional real-money acceptance test was induced.
+
+Maintenance is off; the approved15-minute new-orders scheduler completed its
+first cycle with zero proposed/customer/subscription changes. Duplicate daily
+cron stays suspended and auto-deploy stays off. Do not deploy latest main.
+Separate recovery/background-job gates are not all restored yet; foundation
+closure and normal scheduled state-sync follow-up remain open.
+
+Production Google recovery preview checked953 transactions, planned zero creates,
+and wrote/sent nothing. A discovered text-versus-checkbox mismatch in the stop-work
+writer was repaired and tested in native isolated Sheets. Read-only downstream
+preflight passed44 sheets; PA semiannual's empty T7:X7 merge was then removed with
+exact surrounding cell metadata preserved, and its narrow preflight passed.
+These45 successful preflights are not historical-job replay or a live dispatch.
+
+The sections below are the original candidate design/history. Their statements
+that installation/native checks had not happened are superseded by this dated
+checkpoint; their transport, privacy and durable-hold requirements still apply.
 
 Owner selected Render-only keys on 1 October 2026. Do not move Authorize.Net
 login, transaction or signature keys into Google Script Properties. Do not
