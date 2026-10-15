@@ -815,6 +815,19 @@ async function createSessionResponse(req, res, { testOnly }) {
 function createPaymentUpdateRouter() {
   const router = express.Router();
 
+  // Owner-approved retirement: all previously issued recovery links are closed.
+  // This router is mounted only at /payment-update; extra-service checkout is separate.
+  router.use((req, res) => {
+    res.set({'Cache-Control':'no-store, max-age=0','Pragma':'no-cache','X-Robots-Tag':'noindex, nofollow','Referrer-Policy':'no-referrer'});
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.path.replace(/\/$/, '') === '/test') {
+      return res.status(200).json({ok:true,legacyRecoveryLinksRetired:true,hostedSessionsEnabled:false,customerEmailsSent:false,retirementVersion:'2026-10-15'});
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return res.status(410).json({ok:false,code:'legacy_recovery_retired',error:'This recovery link is no longer available. Contact Fast Filings before submitting another payment.'});
+    }
+    return res.status(410).type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Recovery link retired | Fast Filings</title><body><main><h1>This recovery link is no longer available.</h1><p>Please contact <a href="mailto:returns@fastfilings.com">returns@fastfilings.com</a> before submitting another payment.</p><p>This page does not confirm payment or account restoration.</p></main></body></html>');
+  });
+
   router.get('/test', (req, res) => {
     res.json({
       ok: true,
