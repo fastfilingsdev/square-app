@@ -41,6 +41,7 @@ const {
 
 const app = express();
 app.use(maintenance.middleware);
+app.use(require('./src/core/legacyBillingRetired').legacyBillingRetired);
 app.get('/foundation-maintenance/health', (req, res) => {
   if (!requireAdminToken(req, res)) return;
   res.set({ 'Cache-Control': 'no-store' }).json({ ok: true, ...maintenance.status(),
@@ -2806,10 +2807,10 @@ app.get('/debug-env', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-  startNewOrdersAutomation();
-  startWebhookWatchdogAutomation();
-  startAuthNetBFallbackAutomation();
-  startRecoveredActiveSyncAutomation();
+  // Legacy billing retired: startNewOrdersAutomation();
+  // Legacy billing retired: startWebhookWatchdogAutomation();
+  // Legacy billing retired: startAuthNetBFallbackAutomation();
+  // Legacy billing retired: startRecoveredActiveSyncAutomation();
 });
 
 app.get('/clover-payments', async (req, res) => {
